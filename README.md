@@ -136,7 +136,7 @@ plaintext = decrypt(ciphertext,key)
 check_if_words (plaintext)
 ```
 ## 3.2 Dictionary-based variational method
-Despite the previous method is really powerful, it doesn't able crack extra small cyphertext (for example, when cyphertext is covered by key less than 5 times), or even guess the keylen. So, if our target is some REALLY SMALL cyphertext and we have a few extra hours - we can try to use this method. 
+Despite the previous method is really powerful, it doesn't able to crack extra small cyphertext (for example, when cyphertext is covered by key less than 5 times), or even guess the keylen. So, if our target is some REALLY SMALL cyphertext and we have a few extra hours - we can try to use this method. 
 
 So, the idea is based on fact, that cyphertext is a sequence of encrypted words in English. We can randomly choose some index in cyphertext and assume that this index is a start of some word in English. Next, iterate over every word in our dictionary, and mutate the tested key according to our assumption. Decrypt cyphertext using tested key and change the best key candidate if the fitness is greater than previous best fitness. Repeat many times.
 
@@ -166,3 +166,57 @@ Despite the fact that this method is more powerful than the previous one, unfort
 Also, since this method is really slow, we should find the way to optimize it. For example, make parallel calculations on different CPU cores.
 
 # 4 Program usage
+## 4.1 Compilations and make targets
+Simple compilation:
+```
+cd src
+make
+```
+Debug compilation:
+```
+cd src
+make debug
+```
+These targets compile executable file and move it to `<PROJECT_ROOT>/bin/` directory
+
+Clean binary:
+```
+cd src
+make clean
+```
+Launch tests:
+```
+cd src
+make test
+```
+## 4.2 Encryption
+Create some file:
+```
+echo "File with some strange text" > file_to_encrypt
+```
+and encrypt it using `-e` option:
+```
+bin/vigenere -e file_to_encrypt > encrypted_file
+```
+The program will ask you to enter the cypher key. Next, it will format it to standard way (only letters in lower case), encrypt and print to `encrypted_file` file
+## 4.3 Decryption
+The only way to decrypt the file in this program is to crack it. 
+Run decryption using `-d` option:
+```
+bin/vigenere -d encrypted_file
+```
+This option will launch the cracking sequence. If the cyphertext is long enough, it will crack it by variational method in a few seconds. Otherwise, it will use Dictionary-based variational method. Be ready to wait for a few hours here :)
+The output is plaintext + key in the next line
+## 4.4 Verbose mode
+There is an option to track the current status of execution. Just export "VERBOSE=1" env. variable:
+```
+export VERBOSE=1
+```
+If this variable is exported, the program prints found plaintext candidates and the current percentage of execution time to stderr.
+## 4.5 Tests
+There s a test suite with some test cases and a simple test script. Just execute
+```
+cd src
+make test
+```
+and track tests execution. Please, pay attention that "short text" test cases are executing very slowly.
