@@ -86,11 +86,83 @@ while not found:
 ```
 ## 2.4 Evaluation whether the text consists of English words
 In case when the cyphertext is very short (13 - 30 letters) IoC method is not enough to evaluate if the text consists of English words. So, 
-let's discuss the dictionary metod to evaluate it. 
+let's discuss the dictionary method to evaluate it. 
 
 This method needs the dictionary of English words. The source is http://www.mieliestronk.com/corncob_lowercase.txt
 
 The method is simple: we iterate over whole dictionary and looking for every entry of current word in the text. We mark every letter in each such substring as a part of some word, even for overlapping cases. In the end, we divide the count of "marked" letters to total letters count. If the rate is more than 0.95 - we assume that the text is consists of English words.
+### Pseudocode:
+```
+def check_if_words (str):
+  ret = False;
+  charmap = [False]*str.length()
+  counter = 0;
+  cur_pos = 0;
+
+  for word in dict:
+    while ((found_pos = find_substr_in_str (str, word)) != -1):
+      for i in range (word.length ()):
+        if false == charmap[found_pos + i]:
+          charmap[cur_pos + i] = true;
+          counter++;
+	if (counter / str.length () > 0.95)
+		ret = true;
+	return ret;
+```
 ### Ideas to improve it
-Despite this method makes less false-positives and false-negatives than IoC method for small texts, it still makes mistakes comparely often. 
+Despite this method makes less false-positives and false-negatives than IoC method for very small texts, it still makes mistakes comparely often. 
 Maybe, there is a way to use "knapsack problem" solution to make such evaluation more precise
+
+# 3 Cracking methods
+## 3.1 Variational method
+Here is a variational method that works even for comparely short ciphertexts. For each letter of the key, we vary
+it and choose the option that gives the best fitness of the decrypted text. It loops over all the letters of
+the key many times and chooses the best key candidate in the end. Here is some pseudocode to illustrate the method:
+```
+from random import randrange
+key = ['A']*period
+fit = -99 # some large negative number
+for i in range (1000 * keylen):
+  K = key[:]
+  x = randrange(period)
+  for i in range(26):
+    K[x] = ALPHABET[i]
+    pt = decrypt(ciphertext,K)
+    F = fitness(pt)
+    if (F > fit):
+      key = K[:]
+      fit = F
+plaintext = decrypt(ciphertext,key)
+check_if_words (plaintext)
+```
+## 3.2 Dictionary-based variational method
+Despite the previous method is really powerful, it doesn't able crack extra small cyphertext (for example, when cyphertext is covered by key less than 5 times), or even guess the keylen. So, if our target is some REALLY SMALL cyphertext and we have a few extra hours - we can try to use this method. 
+
+So, the idea is based on fact, that cyphertext is a sequence of encrypted words in English. We can randomly choose some index in cyphertext and assume that this index is a start of some word in English. Next, iterate over every word in our dictionary, and mutate the tested key according to our assumption. Decrypt cyphertext using tested key and change the best key candidate if the fitness is greater than previous best fitness. Repeat many times.
+
+Or more simple: It loops over all the letters of the key many times and chooses the best key candidate in the end by analogy with the previous method, but this method mutates the key in more aggressive way every iteration.
+### pseudocode:
+```
+from random import randrange
+key = ['A']*period
+fit = -99 # some large negative number
+for i in range (1000):
+  x = randrange(period)
+  for word in dict:
+    K = key[:]
+    reversed_key = get_key_from_word(ciphertext, word, x)
+    insert_reversed_key (K, reversed_key)
+    pt = decrypt(ciphertext,K)
+    F = fitness(pt)
+    if (F > fit):
+      key = K[:]
+      fit = F
+plaintext = decrypt(ciphertext,key)
+check_if_words (plaintext)
+```
+### What to improve there
+Despite the fact that this method is more powerful than the previous one, unfortunately, it is still not bulletproof and makes mistakes comparely often. One of the easy ways to reduce False Negatives - is to save some number of key candidates instead of saving a single one "best" candidate. Also, if the text is very small - there is a big chance to got a False Positive - when plaintext candidate  was assumed as an English words text, but it is not. This problem should be solved by "check_if_words" function improving.
+
+Also, since this method is really slow, we should find the way to optimize it. For example, make parallel calculations on different CPU cores.
+
+# 4 Program usage
