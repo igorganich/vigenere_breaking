@@ -1,6 +1,6 @@
 # Vigenère Cipher Breaker
 
-A C++ tool for cracking ciphertexts encrypted with the Vigenère cipher. Implements two cryptanalysis methods: a **variational method** for standard-length ciphertexts and a **dictionary-based variational method** for very short ones.
+A C++ tool for cracking ciphertexts encrypted with the Vigenère cipher, with no knowledge of the key. Works on ciphertexts from 5 characters upward, including cases where the ciphertext is nearly as short as the key itself.
 
 ---
 
@@ -9,8 +9,10 @@ A C++ tool for cracking ciphertexts encrypted with the Vigenère cipher. Impleme
 1. [Background](#1-background)
 2. [Theory](#2-theory)
 3. [Cracking Methods](#3-cracking-methods)
-4. [Building and Usage](#4-building-and-usage)
-5. [Known Limitations and Future Work](#5-known-limitations-and-future-work)
+4. [Modes of Operation](#4-modes-of-operation)
+5. [Building and Usage](#5-building-and-usage)
+6. [Output Format](#6-output-format)
+7. [Performance Characteristics](#7-performance-characteristics)
 
 ---
 
@@ -18,254 +20,238 @@ A C++ tool for cracking ciphertexts encrypted with the Vigenère cipher. Impleme
 
 ### 1.1 The Vigenère Cipher
 
-The Vigenère cipher is a periodic polyalphabetic substitution cipher. Each plaintext letter is shifted by an amount determined by the corresponding letter of a repeating key.
+The Vigenère cipher is a periodic polyalphabetic substitution cipher. Each plaintext letter is shifted cyclically by the corresponding letter of a repeating key.
 
-Formally, if the key has length `L` with characters `k[0], k[1], ..., k[L-1]`, then the `i`-th ciphertext character is:
+Formally, with key length `L`:
 
 ```
 c[i] = (p[i] + k[i mod L]) mod 26
-```
-
-where letters are represented as integers `A=0, B=1, ..., Z=25`.
-
-Decryption reverses this:
-
-```
 p[i] = (c[i] - k[i mod L] + 26) mod 26
 ```
 
+where letters are integers `a=0, b=1, ..., z=25`.
+
 ### 1.2 Assumptions
 
-This tool operates under the following constraints:
-
-- The encryption key is at most **12 characters** long
-- The plaintext consists only of **lowercase English letters** (no spaces, digits, or punctuation)
-- The plaintext is **natural English text**
+- Key length is at most **12 characters**
+- Plaintext consists of **lowercase English letters only** (spaces and punctuation stripped before encrypting)
+- Plaintext is **natural English text** composed of recognizable words
 
 ---
 
 ## 2. Theory
 
-### 2.1 Fitness: Measuring How English a Text Looks
+### 2.1 Tetragram Fitness
 
-The core of both cracking methods is a **fitness function** — a way to score how closely a candidate plaintext resembles natural English.
-
-This implementation uses **tetragrams** (four-letter sequences) and their observed frequencies in English. The fitness of a text is the average log-probability of its tetragrams:
-
-```python
-def fitness(text):
-    result = 0
-    for i in range(len(text) - 3):
-        tetragram = text[i:i+4]
-        x = (index(tetragram[0]) * 26^3 +
-             index(tetragram[1]) * 26^2 +
-             index(tetragram[2]) * 26 +
-             index(tetragram[3]))
-        y = tetrafrequencies[x]
-        result += log(y) if y > 0 else -15
-    return result / (len(text) - 3)
-```
-
-Dividing by the number of tetragrams normalizes the score so it is independent of text length, making it comparable across candidate decryptions of different lengths. Typical English text scores around **-9.6**.
-
-Tetragram frequency data is sourced from [practicalcryptography.com](http://practicalcryptography.com/cryptanalysis/letter-frequencies-various-languages/english-letter-frequencies/).
-
-### 2.2 Finding the Key Length: Index of Coincidence
-
-The **Index of Coincidence (IoC)** measures the probability that two randomly chosen characters in a text are identical:
+The core scoring function measures how closely a candidate plaintext resembles English by computing the average log-probability of its four-letter sequences (tetragrams):
 
 ```
-IoC = 26 * Σ(n[i] * (n[i] - 1)) / (N * (N - 1))
+fitness(text) = (1/N) * Σ log P(text[i..i+3])
 ```
 
-where `n[i]` is the count of letter `i` and `N` is the total character count. The factor of 26 normalizes the result so that:
-- **Random text** → IoC ≈ 1.0
-- **English text** → IoC ≈ 1.7
+where `N` is the number of tetragrams and probabilities come from a pre-built table of observed English tetragram frequencies. English text typically scores around **−9 to −13**; random text scores below **−15**.
 
-To find the key length, the ciphertext is split into `m` slices, where slice `j` contains every `m`-th character starting at position `j`. The average IoC across all slices is computed for increasing values of `m`. The smallest `m` whose average IoC exceeds **1.6** is taken as the key length.
+All hot-path fitness computations work directly on cipher/key bytes with no heap allocation.
 
-```python
-def find_key_length(ciphertext):
-    period = 0
-    while True:
-        period += 1
-        slices = [''] * period
-        for i, char in enumerate(ciphertext):
-            slices[i % period] += char
-        avg_ioc = sum(index_of_coincidence(s) for s in slices) / period
-        if avg_ioc > 1.6:
-            return period
+### 2.2 Index of Coincidence (Key Length Detection)
+
+The Index of Coincidence (IoC) of a text measures the probability that two randomly chosen characters are identical:
+
+```
+IoC = 26 * Σ n[i]*(n[i]-1) / (N*(N-1))
 ```
 
-### 2.3 Dictionary-Based English Validation
+English text has IoC ≈ 1.7; uniformly random text has IoC ≈ 1.0. When the ciphertext is split into `m` slices (slice `j` = every `m`-th character starting at position `j`), each slice is a Caesar-shifted English text if `m` equals the true key length. The algorithm tries `m = 1, 2, 3, …` and returns the first `m` whose average slice IoC exceeds **1.6**.
 
-For very short ciphertexts, statistical methods like IoC are unreliable due to insufficient data. An alternative validation method checks whether a candidate plaintext is composed primarily of English words.
+### 2.3 Word Segmentation
 
-The algorithm scans the candidate text for every word in a dictionary, marks each matched character, and computes the coverage ratio:
+Candidate plaintexts are evaluated not just by fitness but by how much of the text can be partitioned into recognized English words. The tool uses **dynamic programming** (longest-coverage segmentation) that, when coverage is tied, prefers longer individual words — so "sunshine" is returned as one word rather than "sun" + "shine".
 
-```python
-def check_if_words(text):
-    charmap = [False] * len(text)
-    marked = 0
-    for word in dictionary:
-        pos = 0
-        while (found := text.find(word, pos)) != -1:
-            for i in range(len(word)):
-                if not charmap[found + i]:
-                    charmap[found + i] = True
-                    marked += 1
-            pos = found + 1
-    return marked / len(text) > 0.95
+Each segment is annotated with its frequency rank from the word list (rank 1 = most common). The average rank across all found words (lower = more common) is the `word_rank` metric.
+
+### 2.4 Key Constraint Propagation
+
+Several methods derive key values directly from a word hypothesis. If dictionary word `w` is hypothesized to appear at cipher position `x`:
+
+```
+k[(x+j) mod L] = (c[x+j] - w[j] + 26) mod 26,  for j = 0..len(w)-1
 ```
 
-If more than **95%** of characters are covered by dictionary words, the text is considered valid English.
-
-Dictionary source: [corncob_lowercase.txt](http://www.mieliestronk.com/corncob_lowercase.txt)
+This simultaneously constrains multiple key slots. A hypothesis is **inconsistent** if two words imply different values for the same key slot and is pruned immediately.
 
 ---
 
 ## 3. Cracking Methods
 
-### 3.1 Variational Method
+### 3.1 Variational Hill-Climbing
 
-This method works well for ciphertexts of moderate length (roughly 30+ characters, depending on key length). It is a **stochastic hill-climbing** search over the key space, guided by the fitness function.
+**When used:** ciphertexts ≥ 30 characters, key length estimated by IoC.
 
-The algorithm iterates many times. Each iteration picks a random key position, tries all 26 possible letters at that position, and keeps the change if it improves fitness:
+Starting from a random key, repeatedly pick a random key position and try all 26 letters. Keep the change if it improves tetragram fitness. Runs `1000 × key_length` iterations per restart; multiple restarts with different seeds are run in parallel.
 
-```python
-def variational_crack(ciphertext, key_length):
-    key = ['A'] * key_length
-    best_fitness = -99
-    for _ in range(1000 * key_length):
-        K = key[:]
-        pos = randrange(key_length)
-        for letter in ALPHABET:
-            K[pos] = letter
-            f = fitness(decrypt(ciphertext, K))
-            if f > best_fitness:
-                key = K[:]
-                best_fitness = f
-    return decrypt(ciphertext, key)
-```
+An incremental fitness calculation (tracking only the tetragrams affected by the changed key position) makes each trial O(ciphertext_length / key_length) instead of O(ciphertext_length), enabling thousands of trials per second.
 
-The `1000 * key_length` iteration count ensures each key position is revisited many times, allowing the search to escape local optima. The result is validated with `check_if_words`.
+### 3.2 Stochastic Short-Key Search
 
-### 3.2 Dictionary-Based Variational Method
+**When used:** key lengths 1–6, any ciphertext length.
 
-For very short ciphertexts (roughly 13–30 characters), the variational method can fail because statistical fitness scores are noisy with little data. This method takes a more aggressive approach: instead of mutating one key letter at a time, it uses **entire dictionary words as key update candidates**.
+Maintains a **pool** of the top-40 key candidates by fitness. Each iteration picks a random ciphertext position, derives key fragments from every dictionary word that fits there, and inserts the resulting key into the pool if it beats the current worst. After many iterations, all pool keys are validated by word coverage.
 
-**Core insight:** if a dictionary word appears at ciphertext position `x`, then the key bytes at those positions are fully determined:
+This is effective for short keys because each word hypothesis constrains a large fraction of the total key.
 
-```
-k[(x + j) mod L] = (c[x + j] - word[j] + 26) mod 26
-```
+### 3.3 Long-Word Exhaustive Search
 
-for each letter `j` of the word. This is `get_key_from_word`.
+**When used:** key lengths 7–12.
 
-The algorithm picks a random ciphertext position, applies this derivation for every word in the dictionary, and keeps the key update if it improves fitness:
+For every dictionary word whose length ≥ key length, the key is fully determined in one consistency-check step (the word wraps around the key at least once, over-constraining it). If the derived key passes the fitness gate, the candidate plaintext is validated. Runs in parallel across dictionary words using OpenMP.
 
-```python
-def dictionary_variational_crack(ciphertext, key_length):
-    key = ['A'] * key_length
-    best_fitness = -99
-    for _ in range(1000):
-        x = randrange(key_length)
-        for word in dictionary:
-            K = key[:]
-            derived = get_key_from_word(ciphertext, word, x)
-            insert_key_fragment(K, derived, x)
-            f = fitness(decrypt(ciphertext, K))
-            if f > best_fitness:
-                key = K[:]
-                best_fitness = f
-    return decrypt(ciphertext, key)
-```
+### 3.4 Word-Seed Hill-Climbing
 
-Each dictionary word simultaneously updates multiple key positions, making each iteration a much larger jump through key space compared to the single-letter variational method. This helps escape the sparse fitness landscape that short ciphertexts produce.
+**When used:** key lengths 7–12, dictionary words shorter than key length.
 
-**Trade-off:** this method is significantly slower than the variational method (potentially hours for short texts) due to the full dictionary iteration at each step.
+Each (word, position) pair seeds the key, then uncovered key positions are filled by one-position-at-a-time hill-climbing (two passes to let positions correct each other). Effectively combines the accuracy of word-hypothesis seeding with the flexibility of gradient search.
+
+### 3.5 Word Cover Search (CSP Backtracking)
+
+**When used:** exhaustive mode only, ciphertexts ≤ 25 characters.
+
+A recursive constraint-satisfaction search that places dictionary words left-to-right, propagating key constraints at each step and backtracking on inconsistency. Unlike methods 3.3 and 3.4, it finds solutions where **multiple short words collectively reveal the key** with no single word spanning the full key length.
+
+At the root level a minimum first-word length heuristic (`kl−1` by default) limits branching. All subsequent levels allow words from length 2 upward. The search is bounded by a node budget and a result limit per key length; both are configurable.
 
 ---
 
-## 4. Building and Usage
+## 4. Modes of Operation
 
-### 4.1 Building
+| Flag | Mode | Methods Used | Use Case |
+|---|---|---|---|
+| *(default)* | BOTH | long-key → short-key if no hit | General decryption |
+| `--long-key` | LONG_FIRST | long-key; skip short-key if high coverage found | Known or suspected long key |
+| `--short-key` | SHORT_ONLY | stochastic short-key only | Known short key |
+| `--exhaustive` | EXHAUSTIVE | all methods, all key lengths, no early exit | Short ciphertexts, uncertain key length |
 
-Standard build:
-```bash
-cd src
-make
-```
+**Default mode** runs the long-key search first (methods 3.3 + 3.4) for key lengths 7–12, then the short-key stochastic search (method 3.2) for key lengths 1–6. If the long-key phase produces a high-coverage result and `--long-key` is specified, the short-key phase is skipped.
 
-Debug build (with debug symbols):
-```bash
-cd src
-make debug
-```
-
-Both targets place the binary at `<PROJECT_ROOT>/bin/vigenere`.
-
-Clean build artifacts:
-```bash
-cd src
-make clean
-```
-
-### 4.2 Encryption
-
-Encrypt a file with a key you provide interactively:
-```bash
-bin/vigenere -e plaintext_file > encrypted_file
-```
-
-The program normalizes the key to lowercase letters only before encrypting. The encrypted output is written to stdout.
-
-### 4.3 Decryption (Cracking)
-
-Crack an encrypted file without knowing the key:
-```bash
-bin/vigenere -d encrypted_file
-```
-
-The program automatically selects the appropriate cracking method:
-- **Long ciphertext** → variational method (seconds)
-- **Short ciphertext** → dictionary-based variational method (potentially hours)
-
-Output is the recovered plaintext followed by the discovered key on the next line.
-
-### 4.4 Verbose Mode
-
-To monitor progress during cracking, set the `VERBOSE` environment variable:
-```bash
-export VERBOSE=1
-bin/vigenere -d encrypted_file
-```
-
-In verbose mode, the program prints candidate plaintexts and the current completion percentage to stderr.
-
-### 4.5 Running Tests
-
-```bash
-cd src
-make test
-```
-
-This runs the bundled test suite. Note that test cases involving short ciphertexts will run slowly due to the dictionary-based method.
+**Exhaustive mode** tries every key length from 1 to 12 with no early exits, collects all candidates across all methods, and ranks them by: coverage ↓ → key length ↑ → word count ↑ → word rank ↑. A 90% coverage gate filters noise.
 
 ---
 
-## 5. Known Limitations and Future Work
+## 5. Building and Usage
 
-**False positives on short texts.** The `check_if_words` function with a 0.95 threshold still produces false positives for very short plaintexts, where random letter combinations can accidentally match many short dictionary words. Possible improvements:
-- Ignore very short words (e.g. under 3 characters) that match too broadly
-- Weight matches by word frequency
-- Explore a knapsack-style covering approach for more precise coverage scoring
+### 5.1 Requirements
 
-**False negatives.** The single best-key approach means an unlucky random walk can miss the correct key. Maintaining a pool of the top-N key candidates instead of only the single best would reduce false negatives.
+- GCC or Clang with C++17 support
+- OpenMP (usually included with GCC)
+- Python 3 (for the test suite only)
 
-**Performance.** The dictionary-based method is inherently slow due to full dictionary iteration at each step. Possible optimizations:
-- Parallelize across CPU cores
-- Use a trie to prune impossible words early based on partial key constraints
-- Precompute and index key derivations
+### 5.2 Building
 
-**Key length detection for short texts.** IoC-based key length detection becomes unreliable below ~30 characters. For very short ciphertexts, trying all key lengths from 1 to 12 in parallel and using fitness as the discriminator may be more robust.
+```bash
+make          # optimized build → bin/vigenere
+make clean    # remove binary
+```
+
+### 5.3 Encrypting
+
+```bash
+bin/vigenere -e <plaintext_file>
+```
+
+The binary prompts for a key on stderr, normalizes both plaintext and key to lowercase letters, and writes the ciphertext to stdout.
+
+```bash
+echo "secret" | bin/vigenere -e plain.txt > cipher.txt
+```
+
+### 5.4 Decrypting (Cracking)
+
+```bash
+bin/vigenere -d <ciphertext_file> [options]
+```
+
+**Options:**
+
+```
+--long-key          run long-key search; skip short-key if high coverage found
+--short-key         run short-key stochastic search only
+--exhaustive        try all key lengths 1..12, no early exits
+
+word_cover_search tuning (only active with --exhaustive):
+  --wcs-min-word N  minimum first-word length at root  (default: kl-1; 0 = no limit)
+  --wcs-results N   max results per key length          (default: 500;   0 = unlimited)
+  --wcs-budget N    max recursion nodes per key length  (default: 500000; 0 = unlimited)
+```
+
+**Examples:**
+
+```bash
+# Standard crack — auto-selects method
+bin/vigenere -d cipher.txt
+
+# Short or ambiguous ciphertext — try everything
+bin/vigenere -d cipher.txt --exhaustive
+
+# Suspected long key only
+bin/vigenere -d cipher.txt --long-key
+
+# Short ciphertext, relax word-cover-search to explore more
+bin/vigenere -d cipher.txt --exhaustive --wcs-min-word 3 --wcs-results 2000
+```
+
+### 5.5 Running Tests
+
+```bash
+bash tests/run_tests.sh
+```
+
+Tests cover key lengths 1–12 and ciphertext lengths from 5 to 24 characters. Each test encrypts a known plaintext, cracks it, and checks that the original plaintext appears among the candidates with ≥ 80% word coverage.
+
+---
+
+## 6. Output Format
+
+Each candidate is printed as a 5-line block:
+
+```
+--- candidate 1 ---
+key:      network
+plain:    algorithmdesign
+words:    [algorithm:1847][design:1502]
+coverage: 100.0%  key_len: 7  words: 2  word_rank: 1675  fitness: -10.34
+```
+
+| Field | Meaning |
+|---|---|
+| `key` | Recovered key |
+| `plain` | Decrypted plaintext |
+| `words` | Non-overlapping word segmentation with per-word frequency ranks |
+| `coverage` | Fraction of plaintext characters covered by recognized words |
+| `key_len` | Key length (matches `key` string length) |
+| `words` (stat) | Number of non-overlapping dictionary words found |
+| `word_rank` | Average frequency rank of found words (lower = more common) |
+| `fitness` | Average tetragram log-probability (higher = more English-like) |
+
+Candidates are sorted: **coverage ↓ → key length ↑ → word count ↑ → word rank ↑**. The top candidate is the most likely correct decryption.
+
+False positives are expected — especially in exhaustive mode on very short ciphertexts — and are by design. The ranked list lets a human (or downstream LLM) quickly identify the semantically meaningful candidate.
+
+---
+
+## 7. Performance Characteristics
+
+| Ciphertext length | Key length | Mode | Typical time |
+|---|---|---|---|
+| ≥ 30 chars | any | default | < 5 s |
+| 13–29 chars | 1–6 | default | < 10 s |
+| 13–29 chars | 7–12 | `--long-key` | < 10 s |
+| 8–12 chars | any | `--exhaustive` | 5–60 s |
+| 5–7 chars | any | `--exhaustive` | < 5 s |
+
+The word cover search budget (`--wcs-budget`) is the main lever for trading speed against recall on very short ciphertexts. The default of 500,000 nodes is sufficient to recover most single-phrase plaintexts; pass `0` for unlimited if you are willing to wait.
+
+---
+
+## Data Sources
+
+- Tetragram frequencies: [practicalcryptography.com](http://practicalcryptography.com/cryptanalysis/letter-frequencies-various-languages/english-letter-frequencies/)
+- Word list: [corncob_lowercase.txt](http://www.mieliestronk.com/corncob_lowercase.txt)
