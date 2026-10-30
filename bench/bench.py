@@ -7,7 +7,7 @@ in the candidate list, how many candidates were produced, and wall time.
 
 Usage:
   python3 bench/bench.py                      # default grid, default CSP settings
-  python3 bench/bench.py --methods csp,csp-min2  # compare search settings
+  python3 bench/bench.py --methods csp-strict,csp-t30  # compare search settings
   python3 bench/bench.py --summary            # re-print summary from CSV
 """
 import argparse, csv, os, random, subprocess, sys, tempfile, time
@@ -20,8 +20,12 @@ BIN   = os.path.join(ROOT, "bin", "vigenere")
 WORDS = os.path.join(ROOT, "txt", "english_words.txt")
 
 METHODS = {
-    "csp":      [],
-    "csp-min2": ["--wcs-min-word", "2"],
+    "csp":        [],                          # default settings (300 s time limit)
+    "csp-strict": ["--wcs-min-word", "99"],    # first word ≥ kl−1 only (stage 0)
+    "csp-t10":    ["--time-limit", "10"],
+    "csp-t30":    ["--time-limit", "30"],
+    "csp-t60":    ["--time-limit", "60"],
+    "csp-full":   ["--time-limit", "0"],       # complete search
 }
 
 FIELDS = ["case", "clen", "kl", "key", "plain", "method",
@@ -68,13 +72,13 @@ def encrypt(plain, key):
                    for i, p in enumerate(plain))
 
 
-def run_one(case, method, timeout):
+def run_one(case, method, timeout, binary, threads):
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write(encrypt(case["plain"], case["key"]))
         path = f.name
     t0 = time.monotonic()
     try:
-        out = subprocess.run([BIN, "-d", path] + METHODS[method],
+        out = subprocess.run([binary, "-d", path, "--threads", str(threads)] + METHODS[method],
                              capture_output=True, text=True, timeout=timeout).stdout
         status = "ok"
     except subprocess.TimeoutExpired:
@@ -150,7 +154,9 @@ def main():
     ap.add_argument("--vocab", type=int, default=5000, help="plaintext words drawn from the top N")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--timeout", type=float, default=120, help="seconds per run")
-    ap.add_argument("--jobs", type=int, default=4, help="parallel runs (each run is single-threaded)")
+    ap.add_argument("--jobs", type=int, default=4, help="cases run in parallel")
+    ap.add_argument("--threads", type=int, default=1, help="cracker threads per run (jobs x threads <= cores)")
+    ap.add_argument("--bin", default=BIN, help="cracker binary to benchmark")
     ap.add_argument("--out", default=os.path.join(ROOT, "bench", "results.csv"))
     ap.add_argument("--summary", action="store_true", help="only print summary of existing CSV")
     args = ap.parse_args()
@@ -178,7 +184,7 @@ def main():
         w = csv.DictWriter(f, FIELDS)
         if new_file:
             w.writeheader()
-        futs = [pool.submit(run_one, c, m, args.timeout) for c, m in todo]
+        futs = [pool.submit(run_one, c, m, args.timeout, args.bin, args.threads) for c, m in todo]
         for i, fut in enumerate(as_completed(futs), 1):
             r = fut.result()
             w.writerow(r); f.flush()

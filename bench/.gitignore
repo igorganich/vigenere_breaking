@@ -1,0 +1,6 @@
+# Benchmark and validation outputs
+*.csv
+*.log
+summary*.txt
+validate_work/
+__pycache__/

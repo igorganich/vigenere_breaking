@@ -47,15 +47,18 @@ inline double fitness(const char* cipher, int clen,
 
 // ── Non-overlapping word segmentation ────────────────────────────────────────
 //
-// Finds the partition of 'text' into dictionary words that maximises the total
-// number of characters covered, using dynamic programming.  Characters not
-// covered by any word in the optimal partition are "stray" and shown as-is in
-// the formatted output.
+// Finds the most probable partition of 'text' into dictionary words under a
+// unigram word model (word_logp), using dynamic programming.  Characters not
+// covered by any word are "stray", cost STRAY_LOGP each (less than any word, so
+// coverage is maximised first) and are shown as-is in the formatted output.
 //
 // Example: "algorithmdesign" → "[algorithm][design]", coverage = 1.0
 //          "bhestriceofonif" → "b[he]str[ice][of][on][if]", coverage ≈ 0.80
 
+static constexpr double STRAY_LOGP = -15.0;
+
 struct WordSegment {
+    double      lm;          // log-probability of the segmentation (higher = better)
     double      coverage;    // fraction of chars belonging to non-overlapping words
     std::string formatted;   // e.g. "[the:1][man:42]x[ent:8103]"
     double      word_score;  // average rank of found words (lower = more common)
@@ -65,8 +68,8 @@ struct WordSegment {
 inline WordSegment word_segment(const std::string& text, const Tables& t)
 {
     int n = (int)text.size();
-    // dp[i] = max chars covered in text[0..i-1] by non-overlapping words
-    std::vector<int> dp(n+1, 0);
+    // dp[i] = best log-probability of text[0..i-1]
+    std::vector<double> dp(n+1, 0.0);
     // back[i] = {prev_end, word_len}: word of word_len ending at i, or {i-1,0} for stray
     struct Back { int prev, wlen; };
     std::vector<Back> back(n+1, {0,0});
@@ -74,21 +77,22 @@ inline WordSegment word_segment(const std::string& text, const Tables& t)
 
     int cap = std::min(t.max_word_len, n);
     for (int i = 1; i <= n; i++) {
-        // stray char: inherit from previous
-        dp[i]   = dp[i-1];
+        // stray char
+        dp[i]   = dp[i-1] + STRAY_LOGP;
         back[i] = {i-1, 0};
 
         for (int l = 1; l <= std::min(i, cap); l++) {
-            if (t.dict_set.count(text.substr(i-l, l))) {
-                int val = dp[i-l] + l;
-                if (val >= dp[i]) { dp[i] = val; back[i] = {i-l, l}; }
+            auto it = t.word_rank.find(text.substr(i-l, l));
+            if (it != t.word_rank.end()) {
+                double val = dp[i-l] + word_logp(it->second, t);
+                if (val > dp[i]) { dp[i] = val; back[i] = {i-l, l}; }
             }
         }
     }
 
     // Backtrack
     std::string fmt;
-    double rank_sum = 0.0; int word_count = 0;
+    double rank_sum = 0.0; int word_count = 0, covered = 0;
     int i = n;
     // Build segments in reverse, then reverse the whole string
     while (i > 0) {
@@ -98,7 +102,7 @@ inline WordSegment word_segment(const std::string& text, const Tables& t)
             auto it = t.word_rank.find(word);
             int rank = (it != t.word_rank.end()) ? it->second : (int)t.word_rank.size() + 1;
             fmt = "[" + word + ":" + std::to_string(rank) + "]" + fmt;
-            rank_sum += rank; word_count++;
+            rank_sum += rank; word_count++; covered += wlen;
             i = prev;
         } else {
             fmt = text[i-1] + fmt;
@@ -107,5 +111,5 @@ inline WordSegment word_segment(const std::string& text, const Tables& t)
     }
 
     double ws = word_count > 0 ? rank_sum / word_count : 0.0;
-    return {(double)dp[n] / n, fmt, ws, word_count};
+    return {dp[n], (double)covered / n, fmt, ws, word_count};
 }

@@ -1,6 +1,6 @@
 CXX      = g++
-CXXFLAGS = -std=c++17 -O3 -march=native -funroll-loops -flto \
-           -Wall -Wextra -Wpedantic
+CXXFLAGS = -std=c++17 -O3 -march=native -funroll-loops -flto=auto \
+           -Wall -Wextra -Wpedantic -pthread
 SRCS     = src/crack.cpp src/main.cpp
 HDRS     = src/tables.hpp src/cipher.hpp src/crack.hpp
 BIN      = bin/vigenere

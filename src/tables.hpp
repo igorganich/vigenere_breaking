@@ -19,7 +19,15 @@ struct Tables {
     std::unordered_set<std::string>  dict_set;   // dict_full as hash set — O(1) word lookup
     std::unordered_map<std::string,int> word_rank; // word → 1-based rank (lower = more common)
     int                              max_word_len = 0;
+    double                           log_zipf_norm = 0.0; // ln Σ 1/r over all ranks
 };
+
+// Unigram word log-probability estimated from frequency rank (Zipf's law):
+// P(rank r) = (1/r) / Σ 1/r'.
+inline double word_logp(int rank, const Tables& t)
+{
+    return -std::log((double)rank) - t.log_zipf_norm;
+}
 
 inline Tables load_tables(const char* quad_file, const char* dict_file)
 {
@@ -68,6 +76,9 @@ inline Tables load_tables(const char* quad_file, const char* dict_file)
                 t.word_rank[w] = rank;
             }
         }
+        double h = 0.0;
+        for (int r = 1; r <= (int)t.word_rank.size(); r++) h += 1.0 / r;
+        t.log_zipf_norm = std::log(h);
     }
 
     return t;
