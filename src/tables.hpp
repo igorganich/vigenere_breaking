@@ -15,8 +15,7 @@ static constexpr double NO_LOG = -15.0;
 
 struct Tables {
     std::array<double, QUAD_LEN> quad{};
-    std::vector<std::string>         dict;       // ≥ 3 chars — key derivation
-    std::vector<std::string>         dict_full;  // ≥ 2 chars — coverage validation
+    std::vector<std::string>         dict_full;  // ≥ 2 chars in frequency order, then "a", "i"
     std::unordered_set<std::string>  dict_set;   // dict_full as hash set — O(1) word lookup
     std::unordered_map<std::string,int> word_rank; // word → 1-based rank (lower = more common)
     int                              max_word_len = 0;
@@ -59,8 +58,15 @@ inline Tables load_tables(const char* quad_file, const char* dict_file)
                 t.dict_set.insert(w);
                 t.word_rank[w] = rank++;
             }
-            if (w.size() >= 3) t.dict.push_back(w);
             t.max_word_len = std::max(t.max_word_len, (int)w.size());
+        }
+        // The word list has no 1-letter words; add "a" and "i" with their
+        // approximate English frequency ranks (ranks of other words unchanged).
+        for (auto [w, rank] : {std::pair<const char*, int>{"a", 5}, {"i", 11}}) {
+            if (t.dict_set.insert(w).second) {
+                t.dict_full.push_back(w);
+                t.word_rank[w] = rank;
+            }
         }
     }
 

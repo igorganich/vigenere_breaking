@@ -55,15 +55,20 @@ static void cmd_encrypt(const char* path)
 }
 
 static void cmd_decrypt(const char* path, const Tables& tables,
-                        KeyPriority priority, const WcsParams& wcs)
+                        const WcsParams& wcs)
 {
     std::string cipher = to_lower_alpha(read_file(path));
     if (cipher.empty()) { std::cerr << "empty ciphertext\n"; std::exit(1); }
     if ((int)cipher.size() < 4) {
         std::cerr << "ciphertext too short to crack (need >= 4 chars)\n"; std::exit(1);
     }
+    if ((int)cipher.size() > MAX_CIPHER_LEN) {
+        std::cerr << "ciphertext too long (" << cipher.size() << " letters; max "
+                  << MAX_CIPHER_LEN << ")\n";
+        std::exit(1);
+    }
 
-    auto candidates = crack(cipher, tables, priority, wcs);
+    auto candidates = crack(cipher, tables, wcs);
 
     if (candidates.empty()) {
         std::cout << "no candidates found\n";
@@ -93,16 +98,11 @@ static void usage(const char* prog)
         "\n"
         "mode:\n"
         "  -e   encrypt (reads key from stdin)\n"
-        "  -d   decrypt\n"
+        "  -d   decrypt (ciphertext of 4.." << MAX_CIPHER_LEN << " letters, key length 1-12)\n"
         "\n"
-        "search strategy (decrypt only):\n"
-        "  --long-key      run long-key search; skip short-key if high coverage found\n"
-        "  --short-key     run short-key stochastic search only\n"
-        "  --exhaustive    try all key lengths 1..12, no early exits\n"
-        "\n"
-        "word_cover_search tuning (only active with --exhaustive):\n"
+        "search tuning (decrypt only):\n"
         "  --wcs-min-word N   minimum first-word length at root (default: kl-1; 0 = no limit)\n"
-        "  --wcs-results N    max results per key length      (default: 500;   0 = unlimited)\n"
+        "  --wcs-results N    max results per key length and first-word length (default: 500; 0 = unlimited)\n"
         "  --wcs-budget N     max recursion nodes per kl      (default: 500000; 0 = unlimited)\n";
     std::exit(1);
 }
@@ -117,15 +117,11 @@ int main(int argc, char** argv)
     }
 
     const char* file = argv[2];
-    KeyPriority priority = KeyPriority::BOTH;
-    WcsParams   wcs;
+    WcsParams wcs;
 
     for (int i = 3; i < argc; i++) {
         std::string arg = argv[i];
-        if      (arg == "--long-key")   priority = KeyPriority::LONG_FIRST;
-        else if (arg == "--short-key")  priority = KeyPriority::SHORT_ONLY;
-        else if (arg == "--exhaustive") priority = KeyPriority::EXHAUSTIVE;
-        else if (arg == "--wcs-min-word" && i+1 < argc) wcs.min_word = std::stoi(argv[++i]);
+        if      (arg == "--wcs-min-word" && i+1 < argc) wcs.min_word = std::stoi(argv[++i]);
         else if (arg == "--wcs-results"  && i+1 < argc) wcs.results  = std::stoi(argv[++i]);
         else if (arg == "--wcs-budget"   && i+1 < argc) wcs.budget   = std::stoi(argv[++i]);
         else { std::cerr << "unknown flag: " << arg << "\n"; usage(argv[0]); }
@@ -136,6 +132,6 @@ int main(int argc, char** argv)
     catch (const std::exception& ex) { std::cerr << ex.what() << '\n'; return 1; }
 
     if (mode == "-e") cmd_encrypt(file);
-    else              cmd_decrypt(file, tables, priority, wcs);
+    else              cmd_decrypt(file, tables, wcs);
     return 0;
 }

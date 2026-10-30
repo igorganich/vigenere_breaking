@@ -78,7 +78,7 @@ inline WordSegment word_segment(const std::string& text, const Tables& t)
         dp[i]   = dp[i-1];
         back[i] = {i-1, 0};
 
-        for (int l = 2; l <= std::min(i, cap); l++) {
+        for (int l = 1; l <= std::min(i, cap); l++) {
             if (t.dict_set.count(text.substr(i-l, l))) {
                 int val = dp[i-l] + l;
                 if (val >= dp[i]) { dp[i] = val; back[i] = {i-l, l}; }
@@ -108,35 +108,4 @@ inline WordSegment word_segment(const std::string& text, const Tables& t)
 
     double ws = word_count > 0 ? rank_sum / word_count : 0.0;
     return {(double)dp[n] / n, fmt, ws, word_count};
-}
-
-// ── Word-coverage validator ───────────────────────────────────────────────────
-//
-// Returns true when enough of 'text' is covered by dict words.
-//
-// Uses dict_full (words >= 2 chars) so short connecting words like "to", "go",
-// "is" contribute to coverage — critical for short plaintexts where a single
-// uncovered bigram would otherwise sink the coverage ratio below a fixed cutoff.
-//
-// Threshold scales with text length: very short texts get a looser cutoff
-// because one or two uncovered characters represent a large percentage.
-
-inline bool check_if_words(const std::string& text, const Tables& t)
-{
-    double threshold = (int)text.size() < 20 ? 0.80
-                     : (int)text.size() < 30 ? 0.88
-                     :                         0.95;
-
-    std::vector<bool> covered(text.size(), false);
-    int cnt = 0;
-    for (const auto& w : t.dict_full) {
-        size_t pos = 0;
-        while ((pos = text.find(w, pos)) != std::string::npos) {
-            for (size_t j = 0; j < w.size(); j++) {
-                if (!covered[pos + j]) { covered[pos + j] = true; ++cnt; }
-            }
-            ++pos;
-        }
-    }
-    return (double)cnt / (double)text.size() >= threshold;
 }
