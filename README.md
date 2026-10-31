@@ -1,150 +1,94 @@
 # Vigenère Cipher Breaker
 
-A C++ tool for cracking **ultra-short** Vigenère ciphertexts (4–25 letters) with no knowledge of the key, including cases where the ciphertext is barely longer than the key itself. It uses one method: a constraint-satisfaction search that covers the ciphertext with dictionary words and derives the key from them.
+A C++ tool that breaks **ultra-short** Vigenère ciphertexts (2–25 letters) with no knowledge of the key. For every key length from 1 to 12 it finds **every** key whose plaintext splits completely into dictionary words, ranks all of them by probability, and stores them in an index file you can query by rank: the best 10, the millionth, or any range.
 
 ---
 
 ## Table of Contents
 
 1. [Background](#1-background)
-2. [Theory](#2-theory)
-3. [The Search](#3-the-search)
+2. [How the Search Works](#2-how-the-search-works)
+3. [Ranking](#3-ranking)
 4. [Building and Usage](#4-building-and-usage)
-5. [Output Format](#5-output-format)
-6. [Performance and Limitations](#6-performance-and-limitations)
+5. [The Index File](#5-the-index-file)
+6. [Performance](#6-performance)
+7. [Limitations](#7-limitations)
+8. [Tests and Benchmark](#8-tests-and-benchmark)
 
 ---
 
 ## 1. Background
 
-### 1.1 The Vigenère Cipher
+### 1.1 The Vigenère cipher
 
-The Vigenère cipher is a periodic polyalphabetic substitution cipher. Each plaintext letter is shifted cyclically by the corresponding letter of a repeating key.
-
-Formally, with key length `L`:
+Each plaintext letter is shifted by the corresponding letter of a repeating key. With key length `L` and letters as numbers `a=0 … z=25`:
 
 ```
 c[i] = (p[i] + k[i mod L]) mod 26
 p[i] = (c[i] - k[i mod L] + 26) mod 26
 ```
 
-where letters are integers `a=0, b=1, ..., z=25`.
-
 ### 1.2 Why short ciphertexts are hard
 
-Classic attacks (index of coincidence, frequency analysis, tetragram hill-climbing) need enough text per key position to see English statistics. At 8–25 letters with a key of up to 12, each key position sees only one to a few letters, so statistics say almost nothing. What remains is the fact that the plaintext must be made of real words — this tool searches on that constraint directly.
+Classic attacks (index of coincidence, frequency analysis, n-gram hill-climbing) need enough text per key letter to see English statistics. With 8–25 letters and a key of up to 12, each key letter decodes only one to three plaintext letters, so statistics say almost nothing. What remains is the constraint that the plaintext must be made of real words. This tool searches on that constraint directly and exhaustively.
 
 ### 1.3 Assumptions
 
-- Key length is at most **12 characters**
-- Ciphertext is **4–25 letters** (longer input is rejected)
-- Plaintext consists of **lowercase English letters only** (spaces and punctuation stripped before encrypting)
-- Plaintext is **natural English text** composed of dictionary words (plus "a" and "i", which the search adds to the word list)
+- Ciphertext of **2–25 letters** (non-letters are stripped; longer input is rejected).
+- Key length **1–12**.
+- The plaintext consists **entirely of dictionary words**: the bundled word list of 44,275 words plus "a" and "i". A plaintext containing a word outside the list is not found (see [§7](#7-limitations)).
 
 ---
 
-## 2. Theory
+## 2. How the Search Works
 
-### 2.1 Key Constraint Propagation
+### 2.1 In simple words
 
-If dictionary word `w` is hypothesized to appear at cipher position `x`:
-
-```
-k[(x+j) mod L] = (c[x+j] - w[j] + 26) mod 26,  for j = 0..len(w)-1
-```
-
-Each word fixes several key slots at once. A hypothesis is **inconsistent** if two words imply different values for the same key slot and is pruned immediately.
-
-### 2.2 Word Language Model and Segmentation
-
-Word probabilities are estimated from frequency rank with Zipf's law, `P(rank r) = (1/r) / Σ 1/r'`. Each candidate plaintext is split into the **most probable sequence of words** by dynamic programming; letters not covered by any word ("stray") cost −15 each, less than any word, so coverage is maximised first. The resulting log-probability is the candidate's `lm`.
-
-### 2.3 Ranking
-
-A candidate is a (key, plaintext) pair, scored by its posterior log-probability:
+Write the plaintext in rows of `L` letters, one row per repetition of the key:
 
 ```
-score = lm(plain) − key_len · ln 26
+row 1:  i a m t o l d t o g o a     ← positions 1–12
+row 2:  n d s e e i t b y f o u     ← positions 13–24
+row 3:  r                           ← position 25
 ```
 
-The second term is the prior of a random key: there are 26^kl keys of length kl, so a fluent plaintext reachable with a short key is stronger evidence than equally fluent text from a long one. Candidates are sorted by score, after dropping those below **90% word coverage**.
+Each **column** belongs to one key letter, and choosing that key letter fills in the whole column at once. So the search goes column by column, trying all 26 key letters, and in each row keeps reading as if spelling words: is what this row has read so far still the start of some word, or a finished word? If any row stops making sense, that choice dies.
 
-On the benchmark this ranks the true plaintext first in 34 of the 36 cases where it was found (the previous coverage → key length → word count → average-rank order managed 26), and 17 of 18 on a separate set of natural phrases.
+After a few columns, all that matters for the rest of the search is a small **bookmark** per row: "row 1 is three letters into a word starting with *to…*", "row 2 just finished a word". *Which* key letters led there no longer matters: those columns are done and never read again. Huge numbers of different key prefixes lead to the same bookmarks, and the search merges them and continues from each bookmark once. That is what makes an exhaustive search feasible: for 25 letters and key length 12 the number of distinct bookmark combinations peaks around 30 million, against roughly 10¹⁷ possible keys.
 
-### 2.4 Tetragram Fitness
+### 2.2 Details
 
-Each candidate is also reported with the average log-probability of its four-letter sequences. English typically scores −9 to −13, random text below −15. Fitness is informational only.
+This is a dynamic program over key columns (`src/dp.cpp`):
+
+- **State per row (track):** either *inside a word that started in this row*, as a node of the dictionary trie (the root means "at a word boundary"); or *reading the tail of a word that started in an earlier row*, as a node of a trie of all proper word suffixes. Each column's states are deduplicated.
+- **Words across row boundaries:** a row may start in the middle of a word. Its state remembers the tail it read; once all columns are done, the head left open at the end of the previous row plus that tail must form a dictionary word (a word may span several rows).
+- **Backward pass:** states that cannot reach an accepted end are discarded.
+- **Reading off keys:** the columns are walked again, carrying for each key prefix the *set* of states it can be in, so every key comes out exactly once.
+- **Short keys (1–4)** would split the text into up to 25 rows, but their key space is tiny (≤ 26⁴ = 456,976 keys), so they are searched by brute force.
+- **Repeated keys:** a key like `abcabc` gives the same plaintext as `abc`; only the shortest form is kept, so every plaintext appears once.
+- Work is spread over all CPU threads.
+
+### 2.3 Key lengths that are skipped
+
+Two cases carry no usable information, and `crack` skips the key length with a note rather than enumerating English:
+
+- **The ciphertext repeats with period `L`.** Then the plaintext must repeat too, and any repeating English text is an equally good answer.
+- **More candidates than `--max-candidates`** (default 150 million). This happens when the key is nearly as long as the text: for key length 9 on 10 letters, only one plaintext letter is tied to another, so almost any word sequence fits.
 
 ---
 
-## 3. The Search
+## 3. Ranking
 
-For every key length `kl = 1 .. min(12, len−1)`, a recursive search covers the ciphertext with words, left to right:
-
-1. Place a first word at position 0. First words are tried in frequency order.
-2. At the leftmost uncovered position, walk the **dictionary trie** along the ciphertext. Where the key slot for a position is already fixed, the plaintext letter is known and only that child is followed; where it is free, every child is tried and fixes the slot. Contradictory words are never generated.
-3. At each word end, recurse to the next position.
-4. As soon as **every key slot is fixed**, the rest of the plaintext is determined: decrypt once, keep the candidate if its word coverage is ≥ 90%, and stop branching.
-
-Candidates go into one pool that keeps the best `--top` (default 10,000) distinct plaintexts by score, so memory stays bounded however long the search runs. The same plaintext reached with several keys — `abc` and its repeat `abcabc` — is kept once, with the shorter key.
-
-Because several short words jointly pin down the key, no single word has to span the whole key length.
-
-### 3.1 Anytime order and time limit
-
-The search is split into buckets, one per (key length, first-word length), and the buckets run from cheapest to most expensive:
-
-- **Stage 0:** for every key length, first words of length ≥ `kl − 1`, longest first. Such a word fixes nearly the whole key, so this stage takes seconds.
-- **Stage s:** for every key length, first words of length `kl − 1 − s`, down to `--wcs-min-word` (default 1, so "a" and "i" can start the plaintext).
-
-Shorter first words fix fewer key slots and branch far more, so each stage costs more than the last. When the **time limit** (default 300 s, calibration included) expires, the search stops and prints everything found so far; the coverage report (§3.2) says how much of the full search that was.
-
-**Per-bucket bounds:**
-
-| Bound | Default | Effect |
-|---|---|---|
-| Results | 500 | Full coverings kept per bucket; the bucket stops when this is reached. Near-misses (90–99% coverage) have a separate cap of the same size that never stops the search. |
-| Node budget | 500,000 | Word placements per bucket. |
-
-Each bucket has its own bounds, so buckets never crowd each other out: the run order only changes *when* results appear, not which.
-
-Buckets are independent, so they run in parallel: worker threads (`--threads`, default all hardware threads) take buckets in the order above, each with its own search state and candidate pool, merged at the end. The output is identical to a single-threaded run. On a 20-thread machine this is about 3× faster on 10-letter texts and 9× on 19-letter ones; the speedup is limited by the few largest buckets, which cannot be split.
-
-### 3.2 Calibration and the coverage report
-
-Coverage is measured against the **full-vocabulary search**: every first word of every length, every consistent continuation, no caps (`--time-limit 0 --wcs-budget 0 --wcs-results 0`).
-
-Before searching, the tool **calibrates** every bucket on the current machine: it times a uniform random sample of up to 16 first words with caps off (at most 0.05 s per bucket, and 10% of the time limit in total) and extrapolates, in the manner of Knuth's estimator for backtracking searches. First words are searched in frequency order, so the time a partly searched bucket has taken says little about its remaining, rarer words; the random sample does.
-
-After the search, a short **coverage report** on stderr says how much of the full-vocabulary search this run did and what a full run would take:
+Candidates are ranked by their posterior log-probability:
 
 ```
-coverage: this run searched <47% of the full vocabulary (estimated by sampling)
-for full coverage: --time-limit 60 --wcs-budget 0 --wcs-results 0  (est. at least 25.2s with 20 threads; raise the limit if it is reached)
+score = log P(plaintext) − key_length · ln 26
 ```
 
-`--report buckets` adds a table of the buckets that did not finish (`--report all`: every bucket; `--report none`: nothing):
+- **log P(plaintext)** is the most probable split into words under a unigram model. Word probabilities follow Zipf's law over the frequency-ordered word list, `P(rank r) = (1/r) / Σ 1/r'`.
+- **− key_length · ln 26** is the prior of a random key: there are 26^L keys of length L, so a fluent plaintext from a short key is stronger evidence than the same from a long one.
 
-| Column | Meaning |
-|---|---|
-| `status` | Why the bucket stopped: `complete`, `time limit`, `node budget`, `result cap`, or `not run` (time ran out first) |
-| `first words` | First words fully searched / words of that length |
-| `word prob.` | Share of the bucket's first-word probability searched: the chance, under the word model, that the true first word was tried |
-| `cpu time` | Thread time spent on the bucket |
-| `est. to full` | Estimated thread time to search the rest of the bucket with no caps |
-
-**The estimates are loose lower bounds** (`<` / `at least`): calibration only sees the start of the expensive subtrees. For `helloworld` a 60 s run said "at least 1m04s" and the full search took 10 min on 20 threads. The suggested `--time-limit` is 1.5× the estimate; if the limit is reached, raise it and run again.
-
-For long full runs, `--progress S` prints the current bucket and its progress on stderr every S seconds.
-
----|---|
-| `status` | Why the bucket stopped: `complete`, `time limit`, `node budget`, `result cap`, or `not run` (time ran out first) |
-| `first words` | First words searched / words of that length, always the most common ones |
-| `word prob.` | Share of the bucket's first-word probability searched — the chance, under the word model, that the true first word was tried |
-| `est. left` | Estimated time to finish the bucket under current caps (0 once it stopped at a cap) |
-| `est. no caps` | Estimated time to search the whole bucket with no caps |
-
-The two summary lines show the gap between this run and a complete one. In the example, the complete search was estimated at over 1 min 36 s and actually took 1 min 44 s. `>` marks a lower bound: a sample was cut short, so the true cost may be higher.
+Ties are broken by key, so the order is deterministic.
 
 ---
 
@@ -153,129 +97,118 @@ The two summary lines show the gap between this run and a complete one. In the e
 ### 4.1 Requirements
 
 - GCC or Clang with C++17 support
-- Python 3 (for the test suite and benchmark only)
+- Python 3 (benchmark only)
 
 ### 4.2 Building
 
 ```bash
 make          # optimized build → bin/vigenere
-make clean    # remove binary
-make test     # run the test suite
+make test     # unit tests + end-to-end tests
+make clean
 ```
 
 ### 4.3 Encrypting
 
 ```bash
-bin/vigenere -e <plaintext_file>
+echo secret | bin/vigenere -e plain.txt > cipher.txt
 ```
 
-The binary prompts for a key on stderr, normalizes both plaintext and key to lowercase letters, and writes the ciphertext to stdout.
+The key is read from stdin; plaintext and key are reduced to lowercase letters.
+
+### 4.4 Cracking
 
 ```bash
-echo "secret" | bin/vigenere -e plain.txt > cipher.txt
+bin/vigenere crack cipher.txt run.idx [options]
 ```
 
-### 4.4 Decrypting (Cracking)
+```
+--top N             print the best N afterwards (default 10)
+--max-key-length N  try key lengths 1..N (default 12)
+--max-candidates N  skip key lengths that would exceed N candidates in total
+                    (default 150000000, about 4 GB of memory while building)
+--threads N         worker threads (default: all)
+```
+
+Progress goes to stderr, the best candidates to stdout:
+
+```
+key length  1: 0 candidates (0.0s)
+...
+key length  8: 32461988 candidates (15.2s)
+key length  9: skipped, more than 116754002 candidates (23.6s)
+ranked 33245998 candidates (7.9s)
+wrote run.idx: 33245998 candidates, 266.0 MB (47.8s in total)
+note: key length 9 skipped: more than 116754002 candidates (too ambiguous to list)
+         1  key zpgc          athataatof  [a:5][that:8][a:5][at:15][of:2]  score -33.85
+         2  key zhtp          abuntingon  [a:5][bunting:20356][on:10]  score -34.13
+```
+
+Each line shows the rank, the key, the plaintext, its word split with each word's frequency rank, and the score.
+
+### 4.5 Reading the index
 
 ```bash
-bin/vigenere -d <ciphertext_file> [options]
+bin/vigenere show run.idx --count                 # candidates per key length, notes
+bin/vigenere show run.idx --first 20              # the 20 most probable
+bin/vigenere show run.idx --nth 1000000           # one candidate by rank
+bin/vigenere show run.idx --range 5000 5100       # a range of ranks
+bin/vigenere show run.idx --rank-of helloworld    # where a given plaintext ranks
 ```
 
-**Options:**
-
-```
---time-limit S    stop after S seconds and print what was found (default: 300; 0 = none)
---top N           print the N most probable candidates (default: 10000; 0 = all)
---threads N       worker threads (default: 0 = all hardware threads)
---progress S      print search progress on stderr every S seconds (default: off)
---report MODE     coverage report on stderr: summary, buckets (unfinished buckets too),
-                  all (every bucket), or none (default: summary)
---wcs-min-word N  shortest first word to try, never above kl-1 (default: 1)
---wcs-results N   max results per key length and first-word length (default: 500; 0 = unlimited)
---wcs-budget N    max word placements per key length and first-word length (default: 500000; 0 = unlimited)
-```
-
-**Examples:**
-
-```bash
-# Standard crack (at most ~5 min)
-bin/vigenere -d cipher.txt
-
-# Search the entire vocabulary: the coverage report prints the exact flags
-# and an estimated duration for the ciphertext at hand
-bin/vigenere -d cipher.txt --time-limit 600 --wcs-budget 0 --wcs-results 0
-
-# Quick look: first word of at least kl−1 letters only (≤ 10 s)
-bin/vigenere -d cipher.txt --wcs-min-word 99
-```
-
-### 4.5 Tests and Benchmark
-
-```bash
-bash tests/run_tests.sh                 # fixed cases, key lengths 1–12, 5–24 letters
-python3 bench/bench.py                  # randomized grid; results in bench/results.csv
-python3 bench/bench.py --methods csp-strict,csp-t30   # compare settings
-python3 bench/bench.py --summary        # re-print the summary from the CSV
-```
-
-The benchmark generates plaintexts from common English words (8–24 letters) with random keys (2–12 letters) and records the rank of the true plaintext, candidate count and time. `--bin` benchmarks a different binary.
+Lookups by rank are instant at any size. `--rank-of` scans the file (a few seconds for tens of millions of candidates).
 
 ---
 
-## 5. Output Format
+## 5. The Index File
 
-Each candidate is printed as a 5-line block:
+A 4096-byte text header, then one 8-byte record per candidate, sorted by score (rank 1 first). Rank `r` is at byte `4096 + 8·(r − 1)`.
 
-```
---- candidate 1 ---
-key:      network
-plain:    algorithmdesign
-words:    [algorithm:7551][design:690]
-coverage: 100.0%  key_len: 7  words: 2  word_rank: 4120  fitness: -11.09  lm: -20.31  score: -43.12
-```
-
-| Field | Meaning |
-|---|---|
-| `key` | Recovered key |
-| `plain` | Decrypted plaintext |
-| `words` | Most probable word segmentation with per-word frequency ranks |
-| `coverage` | Fraction of plaintext characters covered by words |
-| `key_len` | Key length |
-| `words` (stat) | Number of words in the segmentation |
-| `word_rank` | Average frequency rank of those words (lower = more common) |
-| `fitness` | Average tetragram log-probability (higher = more English-like) |
-| `lm` | Log-probability of the segmentation under the word model (§2.2) |
-| `score` | Ranking score: `lm − key_len · ln 26` (§2.3) |
-
-The top candidate is the most probable decryption. A very short ciphertext genuinely admits many readings, so the list is long; the ranking puts the plausible ones first.
+- **Header** (text lines): `VIGIDX 1`, the ciphertext, a fingerprint of the word list, the maximum key length, the candidate count, the count per key length, and notes for skipped key lengths. An index can only be read with the word list it was built with.
+- **Record:** the key length in the top 6 bits and the key packed base 26 below. Plaintext, word split and score are recomputed from the key when read.
 
 ---
 
-## 6. Performance and Limitations
+## 6. Performance
 
-Benchmark: 78 random cases (seed 1, 3 per (length, key length) cell), single-threaded.
+Measured on a 20-thread machine.
 
-> These numbers predate multithreading, the bounded candidate pool, the separate near-miss cap and one-letter first words; they have not been re-measured yet.
-
-| Setting | Found | Top-1 | Top-10 | Median time |
+| Ciphertext | Key length | Candidates | True plaintext | Time |
 |---|---|---|---|---|
-| `--wcs-min-word 99` (stage 0 only) | 46.2% | 43.6% | 46.2% | 3 s |
-| `--time-limit 10` | 53.8% | 50.0% | 52.6% | 10 s |
-| `--time-limit 30` | 56.4% | 52.6% | 55.1% | 30 s |
-| **default** (`--time-limit 60`) | **60.3%** | **53.8%** | **59.0%** | 60 s |
-| `--time-limit 0` (complete) | 66.7% | 60.3% | 65.4% | ~140 s, up to ~10 min |
+| `iloveyou` (8 letters) | 5 | 6,156,916 | rank 649 | 2.7 s |
+| `helloworld` (10 letters) | 6 | 33,245,998 (key length 9 skipped) | rank 16 | 48 s |
+| `iamtoldtogoandseeitbyfour` (25 letters, `bench/stress.sh`) | 12 | 55,577,417 | rank 4,980 | 3 min 17 s |
 
-Found rate by key length (default settings): 100% at `kl = 2` and 4, 67% at 6, 33% at 8, 8% at 10, 22% at 12.
+For the 25-letter stress case, key lengths 1–10 take a few seconds and key lengths 11 and 12 take the rest; the index is 445 MB. The search it replaced (a word-by-word constraint search) was extrapolated to take about two months for the same case.
 
-**Known limitations:**
+Building needs about 28 bytes of memory per candidate, plus the DP columns (up to about 1 GB for 25 letters with key length 12).
 
-- **Long keys.** With a key of 8–12 letters, a ciphertext of 8–24 letters constrains each key slot only once or twice, so thousands of readings fit and the relaxed stages for long keys come last. Even the complete search finds only 17–50% of these cases.
-- **Run time grows with length.** The complete search takes seconds at 8–12 letters but minutes at 16–24; the default time limit trades the last ~6 points of recall for a bounded run.
-- **Word model.** Word probabilities are estimated from rank only (no counts, no word pairs), and the benchmark's plaintexts come from the same ranked list, which flatters the model. A word-bigram model would be the next step for ranking.
+---
+
+## 7. Limitations
+
+- **Dictionary coverage.** Every word of the plaintext must be in `txt/english_words.txt`. The list covers more than one might expect ("dont", "london", "email") but misses, for example, "usa", "covid", "smartphone", "wifi" and American "color".
+- **Ambiguity.** When the text is short relative to the key, enormous numbers of word sequences fit, and no search can tell them apart: 25 letters with key length 12 give 48 million candidates; key length 9 on 10 letters gives hundreds of millions (skipped). Below about 1.5 × the key length (e.g. 13 letters with key length 10) a ciphertext has no unique reading, and such key lengths usually exceed `--max-candidates`. Only the ranking can choose.
+- **Ranking.** The unigram word model favours common words, so word salad like "may employ ushered triple tow" can outrank a real sentence; on the stress case the true plaintext is at rank 4,980. A word-pair model is the natural next step ([TODO.md](TODO.md)).
+- **Skipped key lengths** (repeating ciphertext, too many candidates) are listed with `show --count`.
+
+---
+
+## 8. Tests and Benchmark
+
+```bash
+make test               # both suites below
+bin/test_dp             # unit tests
+bash tests/run_tests.sh # end-to-end tests
+bash bench/stress.sh    # 25-letter, key-length-12 stress case → bench/stress.log
+python3 bench/bench.py  # randomized grid → bench/results.csv
+```
+
+- **Unit tests** (`tests/test_dp.cpp`): the search against an independent brute force for key lengths 1–5 on texts of 8, 12, 19 and 22 letters (2–5 rows, words crossing rows), and the index file: round trip, score order, one entry per plaintext, `rank_of`, skipped key lengths, rejection of non-index files.
+- **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–8 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts. Texts over 16 letters stop at key length 10 to keep the suite shorter; the stress script covers the full range. The suite caps its own memory at 10 GB.
+- **Benchmark** (`bench/bench.py`): plaintexts from common words (8–24 letters) with random keys (2–12 letters); records the rank of the true plaintext, the candidate count and the time.
 
 ---
 
 ## Data Sources
 
-- Tetragram frequencies: [practicalcryptography.com](http://practicalcryptography.com/cryptanalysis/letter-frequencies-various-languages/english-letter-frequencies/)
-- Word list: [corncob_lowercase.txt](http://www.mieliestronk.com/corncob_lowercase.txt)
+- Word list: [corncob_lowercase.txt](http://www.mieliestronk.com/corncob_lowercase.txt), in frequency order

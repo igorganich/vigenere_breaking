@@ -1,0 +1,4 @@
+# Build and test outputs
+bin/test_dp
+tests/last_run.log
+*.idx

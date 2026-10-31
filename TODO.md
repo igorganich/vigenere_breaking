@@ -1,64 +1,39 @@
 # TODO
 
-## Time-limited mode: replace the node budget with a per-bucket time share
+## Ranking: a word-pair model
 
-**Problem.** In a time-limited run, each bucket (key length × first-word length) stops at a
-fixed node budget of 500,000 word placements. Since the search became multithreaded, all
-threads draw on one bucket's budget at once, so each first word gets only about 1/20 of it.
-Most expensive buckets end with no first word finished, and the run stops long before the
-time limit.
+The search is exhaustive, so finding the plaintext is no longer the problem; ranking it is.
+Scores use unigram word frequencies estimated from rank, so word salad of common words
+outranks real sentences. On the stress case (`bench/stress.sh`, 25 letters, key length 12)
+the true plaintext is at rank 4,980 of 55.6 million, behind readings like "may employ
+ushered triple tow".
 
-Stress test (`bench/stress.sh`, default settings, 20 threads, 25 letters, key length 12):
+A word-bigram model (log P(w₂ | w₁) from a corpus) would rank grammatical sequences far
+higher. It needs a bigram table with counts; the current word list has ranks only. Scoring
+stays a DP over the word split, with the previous word as extra state.
 
-- every run ended after 22–27 s of the 300 s limit, with under 10% of the full vocabulary
-  searched;
-- the key-length-12 buckets with 1–3-letter first words each used their budget in about 8 s
-  and finished 0 first words;
-- with 6-letter first words: 0 of 5,812 finished.
+## Custom words: `--dict FILE`
 
-**Proposal.** Drop the node budget in time-limited mode and give each bucket a share of wall
-time instead: `remaining time / remaining buckets`, recomputed as buckets finish, so cheap
-buckets pass their unused time on. The whole time limit then gets used, and no bucket is
-starved by an earlier one. The coverage report stays as it is, with "time share" replacing
-"node budget" as the reason a bucket was cut.
+Without stray letters, a plaintext is only found if every word is in the dictionary. The
+list covers more than expected ("dont", "london", "email"), but misses e.g. "usa", "covid",
+"smartphone", "wifi" and American "color". An option to add a file of extra words (names,
+domain terms) would cover most gaps. A much larger dictionary grows the search, so this
+is meant for a few hundred words, not a 300,000-word list.
 
-Does not affect full-vocabulary runs (`--wcs-budget 0 --wcs-results 0 --time-limit 0`),
-which have no caps.
+## Faster index building
 
-## GPU port of the full-vocabulary search
+- The forward pass of the column DP is single-threaded (about 1 min of the 3.5 min for the
+  stress case); each column can be split across threads.
+- States are 8 bytes per track plus padding; a compact encoding (17-bit trie nodes)
+  would cut memory per column by about half and allow longer columns before
+  `--max-candidates` matters.
 
-**Why.** Full-vocabulary coverage is CPU-bound: `helloworld` (10 letters) takes 10 min on
-20 CPU threads, and the 25-letter, key-length-12 stress case takes hours. A plain GPU key
-brute force has the opposite profile. Its cost depends only on the key space,
-min(12, length − 1) letters, so it is fast on very short texts but hits a fixed wall at 26¹²:
+## Out of scope (recorded so they are not revisited)
 
-| ciphertext | keys | RTX 4090 at 10¹⁰ / 10¹¹ / 10¹² keys/s (estimated, not measured) |
-|---|---|---|
-| 10 letters (keys ≤ 9) | 5.7 × 10¹² | 9 min / 56 s / 6 s |
-| 12 letters (keys ≤ 11) | 3.8 × 10¹⁵ | 4.4 days / 11 h / 1.1 h |
-| 13–25 letters (keys ≤ 12) | 9.9 × 10¹⁶ | 115 days / 11.5 days / 28 h |
-
-Both approaches produce the same candidate list under the same acceptance rule (≥ 90%
-word coverage) and ranking; the GPU only buys speed.
-
-**Idea.** Run the CSP itself on the GPU: dictionary pruning (search only word sequences
-that fit) combined with ~100× the parallelism of 20 CPU threads.
-
-- Work units as on the CPU: (bucket, first word), split by second word where a bucket has
-  few first words. One unit per thread block or warp, scheduled in plan order.
-- Trie in GPU global memory (read-only, a few MB); the top of the trie and a
-  valid-4-letter-prefix bitmap (26⁴ bits = 57 KB) in shared memory for cheap early
-  rejection.
-- The recursion becomes an explicit per-thread stack: depth ≤ 25 positions, plus the key
-  buffer (≤ 12 slots).
-- Accepted keys go to a per-block buffer; the host does segmentation, scoring and the
-  top-N pool, as now. Candidates are rare compared to search nodes.
-- Main risk: warp divergence. Subtree sizes vary by orders of magnitude, so neighbouring
-  threads finish at very different times; this needs work stealing or fine-grained units.
-
-**Expected payoff.** Largest exactly where the CPU struggles: 13–25-letter texts with long
-keys, where brute force needs days to months and the CSP explores only a tiny fraction of
-the key space.
-
-**Baseline to beat.** Wall time of `bench/stress.sh` case A at full coverage on 20 CPU
-threads (run in progress; see `bench/stress_full.log`).
+- **Ciphertexts that repeat with the key's period.** The plaintext must then repeat too,
+  and any repeating English text is an equally good answer, so the key length carries no
+  information. `crack` skips such key lengths with a note.
+- **Key lengths with more candidates than `--max-candidates`.** With a key nearly as long as
+  the text (e.g. key length 9 on 10 letters), almost any word sequence fits; listing them
+  is enumerating English. `crack` skips such key lengths with a note.
+- **Disk space** for very large indexes (8 bytes per candidate).

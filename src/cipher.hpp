@@ -3,113 +3,62 @@
 #include <string>
 #include <vector>
 
-// ── Vigenere primitives ───────────────────────────────────────────────────────
+// ── Vigenère primitives ───────────────────────────────────────────────────────
 
-inline char vig_enc(char p, char k) { return 'a' + (p - 'a' + k - 'a') % 26; }
-inline char vig_dec(char c, char k) { return 'a' + (c - k + 26)         % 26; }
+inline char vig_enc(char p, char k) { return 'a' + (p - 'a' + k - 'a') % ALPHA; }
+inline char vig_dec(char c, char k) { return 'a' + (c - k + ALPHA) % ALPHA; }
 
 inline std::string vig_decrypt(const std::string& cipher, const std::string& key)
 {
-    std::string plain(cipher.size(), '\0');
-    int klen = (int)key.size();
-    for (int i = 0; i < (int)cipher.size(); i++)
-        plain[i] = vig_dec(cipher[i], key[i % klen]);
+    std::string plain(cipher.size(), 'a');
+    for (size_t i = 0; i < cipher.size(); i++) plain[i] = vig_dec(cipher[i], key[i % key.size()]);
     return plain;
 }
 
-// ── Tetragram fitness (no heap allocation) ────────────────────────────────────
+// ── Scoring ───────────────────────────────────────────────────────────────────
 //
-// Computes average log-probability of 4-grams in the candidate decryption.
-// Works directly on raw cipher/key bytes so the hot loop stays allocation-free.
-
-inline double fitness(const char* cipher, int clen,
-                      const char* key,    int klen,
-                      const std::array<double, QUAD_LEN>& quad)
-{
-    int n = clen - 3;
-    if (n <= 0) return NO_LOG;
-
-    // Precompute key[i % klen]-'a' for all positions to avoid repeated modulo
-    // in the inner loop (klen ≤ 12, clen ≤ ~1000, so stack is fine).
-    int kv[1024];
-    for (int i = 0; i < clen; i++) kv[i] = key[i % klen] - 'a';
-
-    double sum = 0.0;
-    for (int i = 0; i < n; i++) {
-        int a = cipher[i  ] - 'a' - kv[i  ] + 26; if (a >= 26) a -= 26;
-        int b = cipher[i+1] - 'a' - kv[i+1] + 26; if (b >= 26) b -= 26;
-        int c = cipher[i+2] - 'a' - kv[i+2] + 26; if (c >= 26) c -= 26;
-        int d = cipher[i+3] - 'a' - kv[i+3] + 26; if (d >= 26) d -= 26;
-        sum += quad[a*17576 + b*676 + c*26 + d];
-    }
-    return sum / (double)n;
-}
-
-// ── Non-overlapping word segmentation ────────────────────────────────────────
-//
-// Finds the most probable partition of 'text' into dictionary words under a
-// unigram word model (word_logp), using dynamic programming.  Characters not
-// covered by any word are "stray", cost STRAY_LOGP each (less than any word, so
-// coverage is maximised first) and are shown as-is in the formatted output.
-//
-// Example: "algorithmdesign" → "[algorithm][design]", coverage = 1.0
-//          "bhestriceofonif" → "b[he]str[ice][of][on][if]", coverage ≈ 0.80
+// The most probable split of `text` into dictionary words under the unigram word model,
+// by dynamic programming.  Every candidate from the search splits fully into words; a
+// letter outside any word ("stray") costs STRAY_LOGP, below any word, so it is only used
+// when the most probable split prefers it.  Returns the log-probability and, if `fmt` is
+// given, the split as "[the:1][cat:2]...".
 
 static constexpr double STRAY_LOGP = -15.0;
 
-struct WordSegment {
-    double      lm;          // log-probability of the segmentation (higher = better)
-    double      coverage;    // fraction of chars belonging to non-overlapping words
-    std::string formatted;   // e.g. "[the:1][man:42]x[ent:8103]"
-    double      word_score;  // average rank of found words (lower = more common)
-    int         word_count = 0; // number of non-overlapping words found
-};
-
-inline WordSegment word_segment(const std::string& text, const Tables& t)
+inline double segment(const Dictionary& d, const std::string& text, std::string* fmt = nullptr)
 {
-    int n = (int)text.size();
-    // dp[i] = best log-probability of text[0..i-1]
-    std::vector<double> dp(n+1, 0.0);
-    // back[i] = {prev_end, word_len}: word of word_len ending at i, or {i-1,0} for stray
-    struct Back { int prev, wlen; };
-    std::vector<Back> back(n+1, {0,0});
-    for (int i = 0; i <= n; i++) back[i] = {i-1, 0};
-
-    int cap = std::min(t.max_word_len, n);
-    for (int i = 1; i <= n; i++) {
-        // stray char
-        dp[i]   = dp[i-1] + STRAY_LOGP;
-        back[i] = {i-1, 0};
-
-        for (int l = 1; l <= std::min(i, cap); l++) {
-            auto it = t.word_rank.find(text.substr(i-l, l));
-            if (it != t.word_rank.end()) {
-                double val = dp[i-l] + word_logp(it->second, t);
-                if (val > dp[i]) { dp[i] = val; back[i] = {i-l, l}; }
+    const int n = (int)text.size();
+    std::vector<double> dp(n + 1, -1e300);
+    std::vector<int>    back(n + 1, 0);    // length of the word ending here, 0 = stray
+    dp[0] = 0;
+    for (int i = 0; i < n; i++) {
+        if (dp[i] + STRAY_LOGP > dp[i + 1]) { dp[i + 1] = dp[i] + STRAY_LOGP; back[i + 1] = 0; }
+        int u = 0;
+        for (int e = i; e < n; e++) {
+            if ((u = d.trie.ch[u][text[e] - 'a']) < 0) break;
+            if (d.trie.mark[u] && dp[i] + d.node_logp[u] > dp[e + 1]) {
+                dp[e + 1] = dp[i] + d.node_logp[u];
+                back[e + 1] = e + 1 - i;
             }
         }
     }
-
-    // Backtrack
-    std::string fmt;
-    double rank_sum = 0.0; int word_count = 0, covered = 0;
-    int i = n;
-    // Build segments in reverse, then reverse the whole string
-    while (i > 0) {
-        auto [prev, wlen] = back[i];
-        if (wlen > 0) {
-            std::string word = text.substr(prev, wlen);
-            auto it = t.word_rank.find(word);
-            int rank = (it != t.word_rank.end()) ? it->second : (int)t.word_rank.size() + 1;
-            fmt = "[" + word + ":" + std::to_string(rank) + "]" + fmt;
-            rank_sum += rank; word_count++; covered += wlen;
-            i = prev;
-        } else {
-            fmt = text[i-1] + fmt;
-            i--;
+    if (fmt) {
+        fmt->clear();
+        for (int i = n; i > 0; ) {
+            int l = back[i];
+            if (l == 0) { *fmt = text[i - 1] + *fmt; i--; continue; }
+            std::string w = text.substr(i - l, l);
+            *fmt = "[" + w + ":" + std::to_string(d.rank.at(w)) + "]" + *fmt;
+            i -= l;
         }
     }
+    return dp[n];
+}
 
-    double ws = word_count > 0 ? rank_sum / word_count : 0.0;
-    return {dp[n], (double)covered / n, fmt, ws, word_count};
+// Ranking score of a (key, plaintext) candidate: log P(plaintext) + log P(key).  A key is a
+// priori one of 26^kl strings, so a fluent plaintext from a short key is stronger evidence
+// than the same from a long one.
+inline double candidate_score(const Dictionary& d, const std::string& plain, int key_len)
+{
+    return segment(d, plain) - key_len * std::log((double)ALPHA);
 }

@@ -1,42 +1,29 @@
 #!/usr/bin/env python3
-"""Benchmark the CSP cracker on short ciphertexts.
+"""Benchmark the cracker on short ciphertexts.
 
-Generates a deterministic set of (plaintext, key) cases, runs bin/vigenere -d
-with each search configuration, and records where the true plaintext ranks
-in the candidate list, how many candidates were produced, and wall time.
+Generates a deterministic set of (plaintext, key) cases, cracks each ciphertext with
+`bin/vigenere crack`, and records the rank of the true plaintext among all candidates
+(`show --rank-of`), the number of candidates and the wall time.
 
 Usage:
-  python3 bench/bench.py                      # default grid, default CSP settings
-  python3 bench/bench.py --methods csp-strict,csp-t30  # compare search settings
-  python3 bench/bench.py --summary            # re-print summary from CSV
+  python3 bench/bench.py                  # default grid
+  python3 bench/bench.py --clens 8,12     # subset of lengths
+  python3 bench/bench.py --summary        # re-print the summary from the CSV
 """
-import argparse, csv, os, random, subprocess, sys, tempfile, time
+import argparse, csv, os, random, re, subprocess, sys, tempfile, time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import median
 
 ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN   = os.path.join(ROOT, "bin", "vigenere")
 WORDS = os.path.join(ROOT, "txt", "english_words.txt")
 
-METHODS = {
-    "csp":        [],                          # default settings (300 s time limit)
-    "csp-strict": ["--wcs-min-word", "99"],    # first word ≥ kl−1 only (stage 0)
-    "csp-t10":    ["--time-limit", "10"],
-    "csp-t30":    ["--time-limit", "30"],
-    "csp-t60":    ["--time-limit", "60"],
-    "csp-full":   ["--time-limit", "0"],       # complete search
-}
-
-FIELDS = ["case", "clen", "kl", "key", "plain", "method",
-          "status", "rank", "n_cands", "seconds"]
+FIELDS = ["case", "clen", "kl", "key", "plain", "status", "rank", "n_cands", "skipped", "seconds"]
 
 
 def load_words(top):
     with open(WORDS) as f:
         words = [w.strip() for w in f if w.strip()]
-    # Plaintext vocabulary: common words, 2+ letters (the dictionary used for
-    # coverage scoring ignores 1-letter words, so "a"/"i" could never be covered).
     return [w for w in words[:top] if len(w) >= 2 and w.isalpha()]
 
 
@@ -62,139 +49,119 @@ def make_cases(args):
             for _ in range(args.per_cell):
                 plain = make_plain(rng, vocab, weights, clen)
                 key = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(kl))
-                cases.append({"case": len(cases), "clen": clen, "kl": kl,
-                              "key": key, "plain": plain})
+                cases.append({"case": len(cases), "clen": clen, "kl": kl, "key": key, "plain": plain})
     return cases
 
 
 def encrypt(plain, key):
-    return "".join(chr((ord(p) - 97 + ord(key[i % len(key)]) - 97) % 26 + 97)
-                   for i, p in enumerate(plain))
+    return "".join(chr((ord(p) - 97 + ord(key[i % len(key)]) - 97) % 26 + 97) for i, p in enumerate(plain))
 
 
-def run_one(case, method, timeout, binary, threads):
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+def run_one(case, args):
+    work = tempfile.mkdtemp()
+    cipher_file = os.path.join(work, "cipher.txt")
+    index_file = os.path.join(work, "run.idx")
+    with open(cipher_file, "w") as f:
         f.write(encrypt(case["plain"], case["key"]))
-        path = f.name
     t0 = time.monotonic()
     try:
-        out = subprocess.run([binary, "-d", path, "--threads", str(threads)] + METHODS[method],
-                             capture_output=True, text=True, timeout=timeout).stdout
-        status = "ok"
+        crack = subprocess.run([args.bin, "crack", cipher_file, index_file, "--top", "0",
+                                "--threads", str(args.threads), "--max-candidates", str(args.max_candidates)],
+                               capture_output=True, text=True, timeout=args.timeout)
+        secs = time.monotonic() - t0
+        if crack.returncode != 0:
+            status, rank, n, skipped = "error", 0, 0, ""
+        else:
+            out = subprocess.run([args.bin, "show", index_file, "--rank-of", case["plain"]],
+                                 capture_output=True, text=True).stdout
+            m = re.search(r"rank (\d+) of (\d+)", out)
+            total = re.search(r"of (\d+)", out)
+            rank = int(m.group(1)) if m else 0
+            n = int(total.group(1)) if total else 0
+            status = "ok"
+            skipped = ";".join(re.findall(r"key length +(\d+): skipped", crack.stderr))
     except subprocess.TimeoutExpired:
-        out, status = "", "timeout"
+        status, rank, n, skipped, secs = "timeout", 0, 0, "", args.timeout
     finally:
-        os.unlink(path)
-    secs = time.monotonic() - t0
-
-    rank, n = 0, 0
-    for line in out.splitlines():
-        if line.startswith("--- candidate"):
-            n += 1
-        elif line.startswith("plain:") and rank == 0 and line.split()[1] == case["plain"]:
-            rank = n
-    return dict(case, method=method, status=status, rank=rank,
-                n_cands=n, seconds=round(secs, 2))
+        for f in (cipher_file, index_file):   # the two files this run created
+            if os.path.exists(f):
+                os.unlink(f)
+        os.rmdir(work)
+    return dict(case, status=status, rank=rank, n_cands=n, skipped=skipped, seconds=round(secs, 2))
 
 
-def summarize(rows, methods):
+def summarize(rows):
     def pct(a, b):
         return f"{100 * a / b:5.1f}%" if b else "   - "
-
-    by_m = defaultdict(list)
-    for r in rows:
-        by_m[r["method"]].append(r)
-    methods = [m for m in methods if m in by_m]
-
+    if not rows:
+        print("no results")
+        return
+    n = len(rows)
+    ranks = [int(r["rank"]) for r in rows]
     print("\n== Overall ==")
-    print(f"{'method':<11} {'cases':>5} {'top1':>7} {'top10':>7} {'found':>7} "
-          f"{'timeout':>7} {'med cands':>9} {'med s':>7} {'max s':>7}")
-    for m in methods:
-        rs = by_m[m]; n = len(rs)
-        r = [int(x["rank"]) for x in rs]
-        print(f"{m:<11} {n:>5} {pct(sum(0 < k <= 1 for k in r), n):>7} "
-              f"{pct(sum(0 < k <= 10 for k in r), n):>7} {pct(sum(k > 0 for k in r), n):>7} "
-              f"{sum(x['status'] == 'timeout' for x in rs):>7} "
-              f"{median(int(x['n_cands']) for x in rs):>9.0f} "
-              f"{median(float(x['seconds']) for x in rs):>7.1f} "
-              f"{max(float(x['seconds']) for x in rs):>7.1f}")
-
+    print(f"cases {n}; found {pct(sum(k > 0 for k in ranks), n)}; "
+          + "; ".join(f"top-{t} {pct(sum(0 < k <= t for k in ranks), n)}" for t in (1, 10, 100, 1000))
+          + f"; median candidates {median(int(r['n_cands']) for r in rows):.0f}"
+          + f"; median time {median(float(r['seconds']) for r in rows):.1f}s"
+          + f"; max time {max(float(r['seconds']) for r in rows):.1f}s")
     for dim in ("kl", "clen"):
-        vals = sorted({int(r[dim]) for r in rows})
-        for label, ok in (("found (any rank)", lambda k: k > 0), ("top-10", lambda k: 0 < k <= 10)):
-            print(f"\n== {label} by {dim} ==")
-            print(f"{'method':<11} " + " ".join(f"{dim}={v:<4}" for v in vals))
-            for m in methods:
-                cells = []
-                for v in vals:
-                    rs = [x for x in by_m[m] if int(x[dim]) == v]
-                    cells.append(pct(sum(ok(int(x["rank"])) for x in rs), len(rs)).strip().rjust(len(dim) + 5))
-                print(f"{m:<11} " + " ".join(cells))
-
-    # Head-to-head: cases CSP found that no other method found, and vice versa.
-    if "csp" in by_m:
-        found = defaultdict(set)
+        print(f"\n== by {dim}: found / top-1 / top-10 / median rank of found / median time ==")
+        groups = defaultdict(list)
         for r in rows:
-            if int(r["rank"]) > 0:
-                found[r["method"]].add(int(r["case"]))
-        others = set().union(*(found[m] for m in methods if m != "csp"))
-        common = set.intersection(*(set(int(x["case"]) for x in by_m[m]) for m in methods))
-        print(f"\n== Head-to-head on {len(common)} cases run by every method ==")
-        print(f"found only by csp:          {len((found['csp'] - others) & common)}")
-        print(f"found by others, not csp:   {len((others - found['csp']) & common)}")
-        print(f"found by nobody:            {len(common - found['csp'] - others)}")
+            groups[int(r[dim])].append(r)
+        for v in sorted(groups):
+            rs = groups[v]
+            rk = [int(r["rank"]) for r in rs]
+            found = [k for k in rk if k > 0]
+            print(f"{dim}={v:<3} {pct(len(found), len(rs))}  {pct(sum(k == 1 for k in rk), len(rs))}  "
+                  f"{pct(sum(0 < k <= 10 for k in rk), len(rs))}  "
+                  f"{(median(found) if found else '-'):>10}  {median(float(r['seconds']) for r in rs):6.1f}s")
+    skipped = [r for r in rows if r["skipped"]]
+    if skipped:
+        print(f"\n{len(skipped)} cases had key lengths skipped (too many candidates or repeating ciphertext)")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--methods", default="csp", help="comma list of: " + ", ".join(METHODS))
     ap.add_argument("--clens", default="8,12,16,20,24", type=lambda s: [int(x) for x in s.split(",")])
     ap.add_argument("--kls", default="2,4,6,8,10,12", type=lambda s: [int(x) for x in s.split(",")])
     ap.add_argument("--per-cell", type=int, default=3, help="cases per (clen, kl) cell")
     ap.add_argument("--vocab", type=int, default=5000, help="plaintext words drawn from the top N")
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--timeout", type=float, default=120, help="seconds per run")
-    ap.add_argument("--jobs", type=int, default=4, help="cases run in parallel")
-    ap.add_argument("--threads", type=int, default=1, help="cracker threads per run (jobs x threads <= cores)")
+    ap.add_argument("--threads", type=int, default=0, help="cracker threads (0 = all)")
+    ap.add_argument("--max-candidates", type=int, default=150_000_000)
+    ap.add_argument("--timeout", type=float, default=3600, help="seconds per case")
     ap.add_argument("--bin", default=BIN, help="cracker binary to benchmark")
     ap.add_argument("--out", default=os.path.join(ROOT, "bench", "results.csv"))
-    ap.add_argument("--summary", action="store_true", help="only print summary of existing CSV")
+    ap.add_argument("--summary", action="store_true", help="only print the summary of an existing CSV")
     args = ap.parse_args()
-    methods = args.methods.split(",")
-    for m in methods:
-        if m not in METHODS:
-            sys.exit(f"unknown method: {m}")
 
     done = []
     if os.path.exists(args.out):
         with open(args.out) as f:
-            done = list(csv.DictReader(f))
+            done = [r for r in csv.DictReader(f) if "n_cands" in r and "skipped" in r]
     if args.summary:
-        summarize(done, methods)
+        summarize(done)
         return
 
     cases = make_cases(args)
-    have = {(r["plain"], r["key"], r["method"]) for r in done}
-    todo = [(c, m) for c in cases for m in methods if (c["plain"], c["key"], m) not in have]
-    print(f"{len(cases)} cases x {len(methods)} methods; {len(todo)} runs to do "
-          f"({len(done)} cached in {args.out})", file=sys.stderr)
-
+    have = {(r["plain"], r["key"]) for r in done}
+    todo = [c for c in cases if (c["plain"], c["key"]) not in have]
+    print(f"{len(cases)} cases; {len(todo)} to run ({len(done)} cached in {args.out})", file=sys.stderr)
     new_file = not os.path.exists(args.out)
-    with open(args.out, "a", newline="") as f, ThreadPoolExecutor(args.jobs) as pool:
+    with open(args.out, "a", newline="") as f:
         w = csv.DictWriter(f, FIELDS)
         if new_file:
             w.writeheader()
-        futs = [pool.submit(run_one, c, m, args.timeout, args.bin, args.threads) for c, m in todo]
-        for i, fut in enumerate(as_completed(futs), 1):
-            r = fut.result()
+        for i, c in enumerate(todo, 1):     # one case at a time: each crack uses all threads
+            r = run_one(c, args)
             w.writerow(r); f.flush()
             done.append({k: str(v) for k, v in r.items()})
-            print(f"[{i}/{len(todo)}] {r['method']:<10} clen={r['clen']:<2} kl={r['kl']:<2} "
-                  f"rank={r['rank']:<5} cands={r['n_cands']:<6} {r['seconds']:6.1f}s {r['status']}",
-                  file=sys.stderr)
-
-    case_keys = {(c["plain"], c["key"]) for c in cases}
-    summarize([r for r in done if (r["plain"], r["key"]) in case_keys], methods)
+            print(f"[{i}/{len(todo)}] clen={r['clen']:<2} kl={r['kl']:<2} rank={r['rank']:<9} "
+                  f"cands={r['n_cands']:<10} {r['seconds']:7.1f}s {r['status']}"
+                  + (f" skipped kl {r['skipped']}" if r["skipped"] else ""), file=sys.stderr)
+    keys = {(c["plain"], c["key"]) for c in cases}
+    summarize([r for r in done if (r["plain"], r["key"]) in keys])
 
 
 if __name__ == "__main__":

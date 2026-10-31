@@ -1,85 +1,95 @@
 #pragma once
 #include <array>
-#include <vector>
-#include <string>
-#include <fstream>
 #include <cmath>
+#include <cstdint>
+#include <fstream>
 #include <stdexcept>
-#include <unordered_set>
+#include <string>
 #include <unordered_map>
-#include <algorithm>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
-static constexpr int  ALPHA    = 26;
-static constexpr int  QUAD_LEN = ALPHA * ALPHA * ALPHA * ALPHA; // 456 976
-static constexpr double NO_LOG = -15.0;
+static constexpr int ALPHA = 26;
 
-struct Tables {
-    std::array<double, QUAD_LEN> quad{};
-    std::vector<std::string>         dict_full;  // ≥ 2 chars in frequency order, then "a", "i"
-    std::unordered_set<std::string>  dict_set;   // dict_full as hash set — O(1) word lookup
-    std::unordered_map<std::string,int> word_rank; // word → 1-based rank (lower = more common)
-    int                              max_word_len = 0;
-    double                           log_zipf_norm = 0.0; // ln Σ 1/r over all ranks
+// Letter trie with 26-way child arrays.
+struct Trie {
+    std::vector<std::array<int, ALPHA>> ch;     // -1 = no child
+    std::vector<char>                   mark;   // a string inserted into the trie ends here
+    std::vector<int>                    parent;
+    std::vector<char>                   letter;
+
+    Trie() { add_node(-1, 0); }
+
+    int add_node(int par, char c) {
+        std::array<int, ALPHA> a;
+        a.fill(-1);
+        ch.push_back(a); mark.push_back(0); parent.push_back(par); letter.push_back(c);
+        return (int)ch.size() - 1;
+    }
+    void insert(const std::string& w) {
+        int u = 0;
+        for (char c : w) {
+            int x = c - 'a';
+            if (ch[u][x] < 0) { int v = add_node(u, c); ch[u][x] = v; }
+            u = ch[u][x];
+        }
+        mark[u] = 1;
+    }
+    int find(const std::string& w) const {
+        int u = 0;
+        for (char c : w) if ((u = ch[u][c - 'a']) < 0) return -1;
+        return u;
+    }
+    std::string str(int u) const {   // the string spelled from the root to node u
+        std::string s;
+        for (; u > 0; u = parent[u]) s += letter[u];
+        return {s.rbegin(), s.rend()};
+    }
 };
 
-// Unigram word log-probability estimated from frequency rank (Zipf's law):
+// Word list with frequency ranks and the two tries the search walks.
+struct Dictionary {
+    std::unordered_set<std::string>     words;     // 2+ letters from the list, plus "a" and "i"
+    std::unordered_map<std::string,int> rank;      // word -> 1-based frequency rank
+    Trie                                trie;      // all words
+    Trie                                suffixes;  // all proper word suffixes (word[i:], i >= 1)
+    std::vector<double>                 node_logp; // trie node -> word log-probability (word ends)
+    std::vector<int>                    node_rank; // trie node -> word rank (word ends)
+    uint64_t                            fingerprint = 1469598103934665603ull;  // FNV-1a of the file
+};
+
+// Word probabilities follow Zipf's law over the frequency-ordered list:
 // P(rank r) = (1/r) / Σ 1/r'.
-inline double word_logp(int rank, const Tables& t)
+inline Dictionary load_dictionary(const std::string& path)
 {
-    return -std::log((double)rank) - t.log_zipf_norm;
-}
-
-inline Tables load_tables(const char* quad_file, const char* dict_file)
-{
-    Tables t;
-    t.quad.fill(NO_LOG);
-
-    // Quadgrams: "tion 13168375"  (lowercase, 4-letter key + count)
-    {
-        std::ifstream f(quad_file);
-        if (!f) throw std::runtime_error(std::string("cannot open ") + quad_file);
-        std::string ng;
-        long cnt, total = 0;
-        std::vector<std::pair<int, long>> rows;
-        while (f >> ng >> cnt) {
-            if ((int)ng.size() != 4) continue;
-            int idx = (ng[0]-'a') * 17576
-                    + (ng[1]-'a') *   676
-                    + (ng[2]-'a') *    26
-                    + (ng[3]-'a');
-            rows.push_back({idx, cnt});
-            total += cnt;
-        }
-        double inv = 1.0 / (double)total;
-        for (auto [idx, c] : rows)
-            t.quad[idx] = std::log((double)c * inv);
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("cannot open " + path);
+    Dictionary d;
+    int r = 1;
+    std::string w;
+    while (f >> w) {
+        for (char c : w) { d.fingerprint ^= (unsigned char)c; d.fingerprint *= 1099511628211ull; }
+        d.fingerprint ^= '\n'; d.fingerprint *= 1099511628211ull;
+        if (w.size() >= 2) { d.words.insert(w); d.rank[w] = r++; }
     }
+    // The list has no 1-letter words; add "a" and "i" at their approximate English ranks.
+    for (auto [word, rk] : {std::pair<const char*, int>{"a", 5}, {"i", 11}})
+        if (d.words.insert(word).second) d.rank[word] = rk;
 
-    {
-        std::ifstream f(dict_file);
-        if (!f) throw std::runtime_error(std::string("cannot open ") + dict_file);
-        std::string w;
-        int rank = 1;
-        while (f >> w) {
-            if (w.size() >= 2) {
-                t.dict_full.push_back(w);
-                t.dict_set.insert(w);
-                t.word_rank[w] = rank++;
-            }
-            t.max_word_len = std::max(t.max_word_len, (int)w.size());
-        }
-        // The word list has no 1-letter words; add "a" and "i" with their
-        // approximate English frequency ranks (ranks of other words unchanged).
-        for (auto [w, rank] : {std::pair<const char*, int>{"a", 5}, {"i", 11}}) {
-            if (t.dict_set.insert(w).second) {
-                t.dict_full.push_back(w);
-                t.word_rank[w] = rank;
-            }
-        }
-        double h = 0.0;
-        for (int r = 1; r <= (int)t.word_rank.size(); r++) h += 1.0 / r;
-        t.log_zipf_norm = std::log(h);
+    for (const auto& x : d.words) {
+        d.trie.insert(x);
+        for (size_t i = 1; i < x.size(); i++) d.suffixes.insert(x.substr(i));
     }
-
-    return t;
+    double h = 0;
+    for (int k = 1; k <= (int)d.rank.size(); k++) h += 1.0 / k;
+    const double logz = std::log(h);
+    d.node_logp.assign(d.trie.ch.size(), 0);
+    d.node_rank.assign(d.trie.ch.size(), 0);
+    for (const auto& [word, rk] : d.rank) {
+        int u = d.trie.find(word);
+        d.node_rank[u] = rk;
+        d.node_logp[u] = -std::log((double)rk) - logz;
+    }
+    return d;
 }
