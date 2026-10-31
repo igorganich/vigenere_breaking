@@ -85,7 +85,10 @@ Candidates are ranked by their posterior log-probability:
 score = log P(plaintext) − key_length · ln 26
 ```
 
-- **log P(plaintext)** is the most probable split into words under a unigram model. Word probabilities follow Zipf's law over the frequency-ordered word list, `P(rank r) = (1/r) / Σ 1/r'`.
+- **log P(plaintext)** is the most probable split into words under a language model, chosen with `--model`:
+  - **`zipf`** (the default for now): single words, with probabilities from Zipf's law over the frequency-ordered word list, `P(rank r) = (1/r) / Σ 1/r'`.
+  - **`unigram`**: single words, `P(w) = c(w) / Σ c` from real word counts (`txt/english_unigrams.txt`).
+  - **`bigram`**: word pairs. `P(w₂ | w₁) = c(w₁ w₂) / c(w₁)` for the 235,000 pairs in `txt/english_bigrams.txt`, and `α(w₁) · P(w₂)` for every other pair, where `α(w₁)` spreads the probability the listed pairs leave over, so `P(· | w₁)` sums to 1. The table only holds pairs seen at least 100,000 times in its corpus, so every unlisted pair is known to be rarer; nothing is tuned. The first word uses `P(w)`. The split is found by a DP whose state is the last word.
 - **− key_length · ln 26** is the prior of a random key: there are 26^L keys of length L, so a fluent plaintext from a short key is stronger evidence than the same from a long one.
 
 Ties are broken by key, so the order is deterministic.
@@ -126,6 +129,7 @@ bin/vigenere crack cipher.txt run.idx [options]
 --max-key-length N  try key lengths 1..N (default 12)
 --max-candidates N  skip key lengths that would exceed N candidates in total
                     (default 150000000, about 4 GB of memory while building)
+--model M           ranking model: zipf, unigram or bigram (default zipf; see section 3)
 --threads N         worker threads (default: all)
 ```
 
@@ -155,7 +159,15 @@ bin/vigenere show run.idx --range 5000 5100       # a range of ranks
 bin/vigenere show run.idx --rank-of helloworld    # where a given plaintext ranks
 ```
 
-Lookups by rank are instant at any size. `--rank-of` scans the file (a few seconds for tens of millions of candidates).
+Lookups by rank are instant at any size. `--rank-of` scans the file (a few seconds for tens of millions of candidates). Scores are recomputed by the model the index is ranked by.
+
+### 4.6 Re-ranking an index
+
+```bash
+bin/vigenere rerank run.idx run-bigram.idx --model bigram   # default model: bigram
+```
+
+Ranks the candidates of an existing index by another model and writes a new index (or overwrites the same file), without repeating the search: about 4 s for 14 million candidates.
 
 ---
 
@@ -163,7 +175,7 @@ Lookups by rank are instant at any size. `--rank-of` scans the file (a few secon
 
 A 4096-byte text header, then one 8-byte record per candidate, sorted by score (rank 1 first). Rank `r` is at byte `4096 + 8·(r − 1)`.
 
-- **Header** (text lines): `VIGIDX 1`, the ciphertext, a fingerprint of the word list, the maximum key length, the candidate count, the count per key length, and notes for skipped key lengths. An index can only be read with the word list it was built with.
+- **Header** (text lines): `VIGIDX 1`, the ciphertext, a fingerprint of the word list, the ranking model and a fingerprint of its tables, the maximum key length, the candidate count, the count per key length, and notes for skipped key lengths. An index can only be read with the word list it was built with and the model tables it was ranked with; `rerank` brings it up to date. Indexes written before models existed have no model line and are ranked by `zipf`.
 - **Record:** the key length in the top 6 bits and the key packed base 26 below. Plaintext, word split and score are recomputed from the key when read.
 
 ---
@@ -204,13 +216,14 @@ python3 bench/bench.py  # randomized grid → bench/results.csv
 python3 bench/realistic.py  # real short phrases → bench/realistic.csv
 ```
 
-- **Unit tests** (`tests/test_dp.cpp`): the search against an independent brute force for key lengths 1–5 on texts of 8, 12, 19 and 22 letters (2–5 rows, words crossing rows), and the index file: round trip, score order, one entry per plaintext, `rank_of`, skipped key lengths, rejection of non-index files.
+- **Unit tests** (`tests/test_dp.cpp`): the search against an independent brute force for key lengths 1–5 on texts of 8, 12, 19 and 22 letters (2–5 rows, words crossing rows), and the index file: round trip, score order, one entry per plaintext, `rank_of`, skipped key lengths, rejection of non-index files; the language models (probabilities sum to 1, the split DPs against a brute force over all splits, the reported split has the reported score, word order matters only to `bigram`, `zipf` is the original scorer); `rerank` (same candidates in the new order, the model recorded and checked, re-ranking back to `zipf` in place restores the original file byte for byte).
 - **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–8 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts. Texts over 16 letters stop at key length 10 to keep the suite shorter; the stress script covers the full range. The suite caps its own memory at 10 GB.
 - **Benchmark** (`bench/bench.py`): plaintexts from common words (8–24 letters) with random keys (2–12 letters); records the rank of the true plaintext, the candidate count and the time. These plaintexts follow the scorer's own unigram model, so this benchmark cannot show whether a better language model helps.
-- **Realistic benchmark** (`bench/realistic.py`): 105 real short phrases (`bench/phrases.txt`: messages, instructions, sayings, plain sentences; 9–23 letters), each with one key, alternately a common English word or random letters, of length 2 to 0.6 × the text length. Reports found / top-1 / top-10 / top-100 / top-1000, mean reciprocal rank and median rank, overall, by key type and by text length, and lists every plaintext ranked below 10 next to the reading ranked first. Indexes are kept in `bench/cache/` so a new ranking model can be measured on the same candidates without repeating the search.
+- **Realistic benchmark** (`bench/realistic.py`): 105 real short phrases (`bench/phrases.txt`: messages, instructions, sayings, plain sentences; 9–23 letters), each with one key, alternately a common English word or random letters, of length 2 to 0.6 × the text length. Reports found / top-1 / top-10 / top-100 / top-1000, mean reciprocal rank and median rank, overall, by key type and by text length, and lists every plaintext ranked below 10 next to the reading ranked first. Indexes are kept in `bench/cache/` (ranked by `zipf`); `--model bigram` re-ranks them and writes `bench/realistic-bigram.csv`, so models are compared on the same candidates without repeating the search.
 
 ---
 
 ## Data Sources
 
 - Word list: [corncob_lowercase.txt](http://www.mieliestronk.com/corncob_lowercase.txt), in frequency order
+- Word and word-pair counts: [count_1w.txt and count_2w.txt](https://norvig.com/ngrams/) by Peter Norvig, from the Google Web Trillion Word Corpus, reduced to the word list by `tools/make_ngram_tables.py`

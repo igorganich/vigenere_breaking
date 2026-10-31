@@ -1,4 +1,5 @@
 #pragma once
+#include "model.hpp"
 #include "tables.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -14,7 +15,9 @@
 // key when read, so rank r is at byte INDEX_HEADER_BYTES + 8·(r − 1).
 //
 // Header lines:  VIGIDX 1 / cipher <text> / dict <fingerprint> <words> /
-//                max_key_length <n> / count <n> / kl <len> <count> ... / note <text> ... / end
+//                model <name> <fingerprint> / max_key_length <n> / count <n> /
+//                kl <len> <count> ... / note <text> ... / end
+// An index without a model line (written before models existed) is ranked by zipf.
 
 static constexpr size_t INDEX_HEADER_BYTES = 4096;
 
@@ -33,10 +36,18 @@ struct IndexSummary {
     std::vector<std::string> notes;                       // e.g. key lengths skipped
 };
 
-// Full-vocabulary search over key lengths 1..min(max_key_length, len − 1); writes the index.
-// Progress lines go to stderr.  Throws std::runtime_error on failure.
-IndexSummary build_index(const std::string& cipher, const Dictionary& dict,
+// Full-vocabulary search over key lengths 1..min(max_key_length, len − 1); writes the index,
+// ranked by `model`.  Progress lines go to stderr.  Throws std::runtime_error on failure.
+IndexSummary build_index(const std::string& cipher, const Dictionary& dict, const LanguageModel& model,
                          const IndexOptions& opt, const std::string& path);
+
+// Rank the candidates of an existing index by `model` and write them to a new index (`out`
+// may equal `in`).  No search is repeated.  Throws std::runtime_error on failure.
+IndexSummary rerank_index(const std::string& in, const std::string& out, const Dictionary& dict,
+                          const LanguageModel& model, int threads);
+
+// Name of the model an index is ranked by ("zipf" for indexes without a model line).
+std::string index_model_name(const std::string& path);
 
 struct Candidate {
     size_t      rank;
@@ -46,9 +57,9 @@ struct Candidate {
 
 class IndexReader {
 public:
-    // Throws std::runtime_error if the file is missing, malformed or was built with a
-    // different dictionary.
-    IndexReader(const std::string& path, const Dictionary& dict);
+    // Throws std::runtime_error if the file is missing, malformed, or was built with a
+    // different dictionary or ranked by a different model (or other model tables).
+    IndexReader(const std::string& path, const Dictionary& dict, const LanguageModel& model);
     ~IndexReader();
     IndexReader(const IndexReader&) = delete;
     IndexReader& operator=(const IndexReader&) = delete;
@@ -64,7 +75,8 @@ public:
 private:
     Candidate decode(size_t rank, uint64_t record) const;
 
-    const Dictionary& dict_;
+    const Dictionary&    dict_;
+    const LanguageModel& model_;
     FILE*             f_ = nullptr;
     std::string       cipher_;
     IndexSummary      summary_;

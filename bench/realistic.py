@@ -8,13 +8,16 @@ real short phrases (bench/phrases.txt): messages, instructions, sayings, plain s
 Each phrase gets one key, alternating between an English word and random letters, with a
 key length of 2..min(12, 0.6 * text length), so the key is never nearly as long as the
 text.  The crack covers every key length, as an attacker who does not know the key length
-would.  Each index is kept in bench/cache/ so a future ranking model can rescore the same
-candidates without repeating the search.
+would.  Each index is kept in bench/cache/ (ranked by zipf, the default model), so another
+ranking model can be measured on the same candidates with `vigenere rerank`, without
+repeating the search.
 
 Usage:
-  python3 bench/realistic.py             # run (cases already in the CSV are not rerun)
-  python3 bench/realistic.py --summary   # re-print the summary from the CSV
-  python3 bench/realistic.py --list      # print the cases and the skipped phrases
+  python3 bench/realistic.py                  # run (cases already in the CSV are not rerun)
+  python3 bench/realistic.py --model bigram   # re-rank the cached indexes by another model
+                                              # (results in bench/realistic-bigram.csv)
+  python3 bench/realistic.py --summary        # re-print the summary from the CSV
+  python3 bench/realistic.py --list           # print the cases and the skipped phrases
 """
 import argparse, csv, os, random, re, resource, subprocess, sys, time
 from collections import defaultdict
@@ -86,6 +89,8 @@ def run_one(case, args):
     index = os.path.join(CACHE, f"{case['cipher']}.idx")
     secs, skipped = "", ""
     count = subprocess.run([args.bin, "show", index, "--count"], capture_output=True, text=True)
+    if count.returncode != 0 and args.cached_only:
+        return None
     if count.returncode != 0:                  # not cached, or built with another dictionary
         cipher_file = os.path.join(CACHE, f"{case['cipher']}.txt")
         partial = index + ".part"
@@ -109,6 +114,13 @@ def run_one(case, args):
                         top1_key="", top1_plain="")
         os.replace(partial, index)
         count = subprocess.run([args.bin, "show", index, "--count"], capture_output=True, text=True)
+    if args.model != "zipf":                   # cheap compared with the search: always redone
+        ranked = os.path.join(CACHE, f"{case['cipher']}.{args.model}.idx")
+        rr = subprocess.run([args.bin, "rerank", index, ranked, "--model", args.model, "--top", "0",
+                             "--threads", str(args.threads)], capture_output=True, text=True)
+        if rr.returncode != 0:
+            sys.exit(f"rerank failed: {rr.stderr}")
+        index = ranked
     n = int(re.search(r": (\d+) candidates", count.stdout).group(1))
     skipped = ";".join(re.findall(r"key length (\d+) skipped", count.stdout))
     rank_out = subprocess.run([args.bin, "show", index, "--rank-of", case["plain"]],
@@ -170,10 +182,15 @@ def main():
     ap.add_argument("--threads", type=int, default=0, help="cracker threads (0 = all)")
     ap.add_argument("--timeout", type=float, default=3600, help="seconds per case")
     ap.add_argument("--bin", default=BIN, help="cracker binary")
-    ap.add_argument("--out", default=os.path.join(ROOT, "bench", "realistic.csv"))
+    ap.add_argument("--model", default="zipf", help="ranking model (zipf = as cracked)")
+    ap.add_argument("--cached-only", action="store_true", help="skip cases whose index is not cached")
+    ap.add_argument("--out", help="CSV (default bench/realistic.csv, or realistic-MODEL.csv)")
     ap.add_argument("--summary", action="store_true", help="only print the summary of the CSV")
     ap.add_argument("--list", action="store_true", help="only print the cases")
     args = ap.parse_args()
+    if not args.out:
+        name = "realistic.csv" if args.model == "zipf" else f"realistic-{args.model}.csv"
+        args.out = os.path.join(ROOT, "bench", name)
 
     words, vocab = load_words()
     phrases, rejected = load_phrases(vocab)
@@ -207,6 +224,9 @@ def main():
             w.writeheader()
         for i, c in enumerate(todo, 1):        # one case at a time: each crack uses all threads
             r = run_one(c, args)
+            if r is None:
+                print(f"[{i}/{len(todo)}] {c['plain']:<26} not cached, skipped", file=sys.stderr)
+                continue
             w.writerow(r)
             f.flush()
             done.append({k: str(v) for k, v in r.items()})

@@ -1,4 +1,5 @@
 #pragma once
+#include "model.hpp"
 #include "tables.hpp"
 #include <string>
 #include <vector>
@@ -17,27 +18,34 @@ inline std::string vig_decrypt(const std::string& cipher, const std::string& key
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
 //
-// The most probable split of `text` into dictionary words under the unigram word model,
-// by dynamic programming.  Every candidate from the search splits fully into words; a
-// letter outside any word ("stray") costs STRAY_LOGP, below any word, so it is only used
-// when the most probable split prefers it.  Returns the log-probability and, if `fmt` is
-// given, the split as "[the:1][cat:2]...".
+// The most probable split of `text` into dictionary words under the language model, by
+// dynamic programming.  Every candidate from the search splits fully into words; a letter
+// outside any word ("stray") costs m.stray_logp, below any word, so it is only used when
+// the most probable split prefers it.  Returns the log-probability and, if `fmt` is given,
+// the split as "[the:1][cat:2]..." (word:frequency rank).
 
-static constexpr double STRAY_LOGP = -15.0;
+namespace scoring_detail {
 
-inline double segment(const Dictionary& d, const std::string& text, std::string* fmt = nullptr)
+inline void word_fmt(const Dictionary& d, const std::string& w, std::string* out)
+{
+    *out = "[" + w + ":" + std::to_string(d.rank.at(w)) + "]" + *out;
+}
+
+// Zipf and unigram models: the state is the position.
+inline double segment_unigram(const Dictionary& d, const LanguageModel& m, const std::string& text,
+                              std::string* fmt)
 {
     const int n = (int)text.size();
     std::vector<double> dp(n + 1, -1e300);
     std::vector<int>    back(n + 1, 0);    // length of the word ending here, 0 = stray
     dp[0] = 0;
     for (int i = 0; i < n; i++) {
-        if (dp[i] + STRAY_LOGP > dp[i + 1]) { dp[i + 1] = dp[i] + STRAY_LOGP; back[i + 1] = 0; }
+        if (dp[i] + m.stray_logp > dp[i + 1]) { dp[i + 1] = dp[i] + m.stray_logp; back[i + 1] = 0; }
         int u = 0;
         for (int e = i; e < n; e++) {
             if ((u = d.trie.ch[u][text[e] - 'a']) < 0) break;
-            if (d.trie.mark[u] && dp[i] + d.node_logp[u] > dp[e + 1]) {
-                dp[e + 1] = dp[i] + d.node_logp[u];
+            if (d.trie.mark[u] && dp[i] + m.uni[u] > dp[e + 1]) {
+                dp[e + 1] = dp[i] + m.uni[u];
                 back[e + 1] = e + 1 - i;
             }
         }
@@ -47,18 +55,105 @@ inline double segment(const Dictionary& d, const std::string& text, std::string*
         for (int i = n; i > 0; ) {
             int l = back[i];
             if (l == 0) { *fmt = text[i - 1] + *fmt; i--; continue; }
-            std::string w = text.substr(i - l, l);
-            *fmt = "[" + w + ":" + std::to_string(d.rank.at(w)) + "]" + *fmt;
+            word_fmt(d, text.substr(i - l, l), fmt);
             i -= l;
         }
     }
     return dp[n];
 }
 
+// Bigram model: the state is the last word, i.e. a span [start, end) of the text, or "no
+// word" at a position (the start of the text, or right after a stray letter).
+inline double segment_bigram(const Dictionary& d, const LanguageModel& m, const std::string& text,
+                             std::string* fmt)
+{
+    struct Span { int start, end, node; };
+    thread_local std::vector<Span>   spans;
+    thread_local std::vector<int>    first, ends, end_first, fill;
+    thread_local std::vector<double> V, C;
+    thread_local std::vector<int>    backV, backC;
+    const int n = (int)text.size();
+
+    // Every dictionary word in the text, grouped by start; then the same grouped by end.
+    spans.clear();
+    first.assign(n + 2, 0);
+    for (int i = 0; i < n; i++) {
+        first[i] = (int)spans.size();
+        int u = 0;
+        for (int e = i; e < n; e++) {
+            if ((u = d.trie.ch[u][text[e] - 'a']) < 0) break;
+            if (d.trie.mark[u]) spans.push_back({i, e + 1, u});
+        }
+    }
+    first[n] = first[n + 1] = (int)spans.size();
+    end_first.assign(n + 2, 0);
+    for (const auto& s : spans) end_first[s.end + 1]++;
+    for (int e = 0; e <= n; e++) end_first[e + 1] += end_first[e];
+    ends.resize(spans.size());
+    fill.assign(end_first.begin(), end_first.end());
+    for (int s = 0; s < (int)spans.size(); s++) ends[fill[spans[s].end]++] = s;
+
+    V.assign(spans.size(), -1e300);  backV.assign(spans.size(), -1);   // -1: after "no word"
+    C.assign(n + 1, -1e300);         backC.assign(n + 1, -1);          // -1: stray after C[e-1]
+    C[0] = 0;
+    for (int e = 0; e < n; e++) {
+        // A stray letter at e, after the best state ending at e.
+        double best = C[e];
+        int    arg  = -1;
+        for (int k = end_first[e]; k < end_first[e + 1]; k++)
+            if (V[ends[k]] > best) { best = V[ends[k]]; arg = ends[k]; }
+        if (best + m.stray_logp > C[e + 1]) { C[e + 1] = best + m.stray_logp; backC[e + 1] = arg; }
+        // A word starting at e, after "no word" or after each word ending at e.
+        for (int t = first[e]; t < first[e + 1]; t++) {
+            const int v = spans[t].node;
+            double val = C[e] + m.uni[v];
+            int    bp  = -1;
+            for (int k = end_first[e]; k < end_first[e + 1]; k++) {
+                const int s = ends[k], u = spans[s].node;
+                const double* p  = m.pairs.get(PairTable::key(u, v));
+                const double  lp = p ? *p : m.backoff[u] + m.uni[v];
+                if (V[s] + lp > val) { val = V[s] + lp; bp = s; }
+            }
+            V[t] = val; backV[t] = bp;
+        }
+    }
+    double best = C[n];
+    int    arg  = -1;
+    for (int k = end_first[n]; k < end_first[n + 1]; k++)
+        if (V[ends[k]] > best) { best = V[ends[k]]; arg = ends[k]; }
+
+    if (fmt) {
+        fmt->clear();
+        int pos = n, s = arg;      // state: span s, or "no word" at pos when s < 0
+        while (pos > 0) {
+            if (s >= 0) {
+                word_fmt(d, text.substr(spans[s].start, spans[s].end - spans[s].start), fmt);
+                pos = spans[s].start;
+                s   = backV[s];
+            } else {
+                *fmt = text[pos - 1] + *fmt;
+                s = backC[pos];
+                pos--;
+            }
+        }
+    }
+    return best;
+}
+
+} // namespace scoring_detail
+
+inline double segment(const Dictionary& d, const LanguageModel& m, const std::string& text,
+                      std::string* fmt = nullptr)
+{
+    return m.kind == ModelKind::Bigram ? scoring_detail::segment_bigram(d, m, text, fmt)
+                                       : scoring_detail::segment_unigram(d, m, text, fmt);
+}
+
 // Ranking score of a (key, plaintext) candidate: log P(plaintext) + log P(key).  A key is a
 // priori one of 26^kl strings, so a fluent plaintext from a short key is stronger evidence
 // than the same from a long one.
-inline double candidate_score(const Dictionary& d, const std::string& plain, int key_len)
+inline double candidate_score(const Dictionary& d, const LanguageModel& m, const std::string& plain,
+                              int key_len, std::string* fmt = nullptr)
 {
-    return segment(d, plain) - key_len * std::log((double)ALPHA);
+    return segment(d, m, plain, fmt) - key_len * std::log((double)ALPHA);
 }

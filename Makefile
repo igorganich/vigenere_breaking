@@ -2,7 +2,7 @@ CXX      = g++
 CXXFLAGS = -std=c++17 -O3 -march=native -funroll-loops -flto=auto \
            -Wall -Wextra -Wpedantic -pthread
 SRCS     = src/dp.cpp src/index.cpp
-HDRS     = src/tables.hpp src/cipher.hpp src/dp.hpp src/index.hpp
+HDRS     = src/tables.hpp src/model.hpp src/cipher.hpp src/dp.hpp src/index.hpp
 BIN      = bin/vigenere
 TEST_BIN = bin/test_dp
 

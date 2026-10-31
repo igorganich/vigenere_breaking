@@ -22,7 +22,8 @@ static std::string exe_dir()
     return slash == std::string::npos ? "." : p.substr(0, slash);
 }
 
-static const std::string DICT_FILE = exe_dir() + "/../txt/english_words.txt";
+static const std::string TXT_DIR   = exe_dir() + "/../txt";
+static const std::string DICT_FILE = TXT_DIR + "/english_words.txt";
 
 static constexpr int MAX_CIPHER_LEN = 25;
 
@@ -54,9 +55,14 @@ static void usage(const char* prog)
         "        --max-key-length N  try key lengths 1..N (default 12)\n"
         "        --max-candidates N  skip key lengths that would exceed N candidates in total\n"
         "                            (default 150000000, about 4 GB of memory)\n"
+        "        --model M           ranking model: zipf, unigram or bigram (default zipf)\n"
         "        --threads N         worker threads (default: all)\n"
+        "  " << prog << " rerank <index_file> <new_index_file> [--model M] [--threads N] [--top N]\n"
+        "      rank the candidates of an index by another model (default bigram), without\n"
+        "      repeating the search; the two files may be the same\n"
         "  " << prog << " show <index_file> (--count | --first N | --nth N | --range A B | --rank-of PLAINTEXT)\n"
-        "      read candidates from an index by rank (rank 1 = most probable)\n";
+        "      read candidates from an index by rank (rank 1 = most probable), scored by the\n"
+        "      model the index is ranked by\n";
     std::exit(1);
 }
 
@@ -70,6 +76,19 @@ static Dictionary load()
 {
     try { return load_dictionary(DICT_FILE); }
     catch (const std::exception& ex) { std::cerr << ex.what() << '\n'; std::exit(1); }
+}
+
+static LanguageModel load_lm(const Dictionary& dict, ModelKind kind)
+{
+    try { return load_model(kind, dict, TXT_DIR); }
+    catch (const std::exception& ex) { std::cerr << ex.what() << '\n'; std::exit(1); }
+}
+
+static ModelKind model_arg(const char* s)
+{
+    ModelKind k;
+    if (!parse_model_kind(s, &k)) { std::cerr << "unknown model " << s << " (models: " << MODEL_NAMES << ")\n"; std::exit(1); }
+    return k;
 }
 
 static int cmd_encrypt(const char* path)
@@ -91,9 +110,11 @@ static int cmd_crack(int argc, char** argv)
     if (argc < 4) usage(argv[0]);
     IndexOptions opt;
     size_t top = 10;
+    ModelKind kind = ModelKind::Zipf;
     for (int i = 4; i < argc; i++) {
         std::string a = argv[i];
         if      (a == "--threads"        && i + 1 < argc) opt.threads        = std::stoi(argv[++i]);
+        else if (a == "--model"          && i + 1 < argc) kind               = model_arg(argv[++i]);
         else if (a == "--max-key-length" && i + 1 < argc) opt.max_key_length = std::stoi(argv[++i]);
         else if (a == "--top"            && i + 1 < argc) top                = std::stoul(argv[++i]);
         else if (a == "--max-candidates" && i + 1 < argc) opt.max_candidates = std::stoull(argv[++i]);
@@ -108,10 +129,37 @@ static int cmd_crack(int argc, char** argv)
         return 1;
     }
     Dictionary dict = load();
+    LanguageModel model = load_lm(dict, kind);
     try {
-        build_index(cipher, dict, opt, argv[3]);
-        IndexReader idx(argv[3], dict);
+        build_index(cipher, dict, model, opt, argv[3]);
+        IndexReader idx(argv[3], dict, model);
         for (const auto& note : idx.summary().notes) std::fprintf(stderr, "note: %s\n", note.c_str());
+        for (const auto& c : idx.range(1, top)) print(c);
+    } catch (const std::exception& ex) {
+        std::cerr << ex.what() << '\n';
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_rerank(int argc, char** argv)
+{
+    if (argc < 4) usage(argv[0]);
+    ModelKind kind = ModelKind::Bigram;
+    int threads = 0;
+    size_t top = 10;
+    for (int i = 4; i < argc; i++) {
+        std::string a = argv[i];
+        if      (a == "--model"   && i + 1 < argc) kind    = model_arg(argv[++i]);
+        else if (a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
+        else if (a == "--top"     && i + 1 < argc) top     = std::stoul(argv[++i]);
+        else { std::cerr << "unknown option: " << a << '\n'; usage(argv[0]); }
+    }
+    Dictionary dict = load();
+    LanguageModel model = load_lm(dict, kind);
+    try {
+        rerank_index(argv[2], argv[3], dict, model, threads);
+        IndexReader idx(argv[3], dict, model);
         for (const auto& c : idx.range(1, top)) print(c);
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
@@ -125,7 +173,11 @@ static int cmd_show(int argc, char** argv)
     if (argc < 4) usage(argv[0]);
     Dictionary dict = load();
     try {
-        IndexReader idx(argv[2], dict);
+        ModelKind kind;
+        const std::string name = index_model_name(argv[2]);
+        if (!parse_model_kind(name, &kind)) throw std::runtime_error(std::string(argv[2]) + ": unknown model " + name);
+        LanguageModel model = load_lm(dict, kind);
+        IndexReader idx(argv[2], dict, model);
         const std::string mode = argv[3];
         const size_t count = idx.summary().count;
         if (mode == "--count") {
@@ -162,6 +214,7 @@ int main(int argc, char** argv)
     const std::string cmd = argv[1];
     if (cmd == "-e")    return cmd_encrypt(argv[2]);
     if (cmd == "crack") return cmd_crack(argc, argv);
+    if (cmd == "rerank") return cmd_rerank(argc, argv);
     if (cmd == "show")  return cmd_show(argc, argv);
     usage(argv[0]);
 }
