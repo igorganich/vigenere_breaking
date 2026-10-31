@@ -5,9 +5,14 @@
 #include <iostream>
 #include <new>
 #include <string>
+#include <thread>
 #include <unistd.h>
+#include <algorithm>
+#include <chrono>
 #include "cipher.hpp"
+#include "gpt2.hpp"
 #include "index.hpp"
+#include "rescore.hpp"
 #include "tables.hpp"
 
 // Resolve data file paths relative to the binary, so the tool works regardless
@@ -25,6 +30,7 @@ static std::string exe_dir()
 
 static const std::string TXT_DIR   = exe_dir() + "/../txt";
 static const std::string DICT_FILE = TXT_DIR + "/english_words.txt";
+static const std::string GPT2_DIR  = exe_dir() + "/../models/gpt2";
 
 static constexpr int MAX_CIPHER_LEN = 25;
 
@@ -51,8 +57,11 @@ static void usage(const char* prog)
         "      encrypt; reads the key from stdin\n"
         "  " << prog << " crack <ciphertext_file> <index_file> [options]\n"
         "      find every key (length 1-12) whose plaintext splits fully into dictionary words,\n"
-        "      rank them by probability and store them in <index_file>\n"
+        "      rank them by probability and store them in <index_file>; then rescore the best\n"
+        "      with GPT-2 (if models/gpt2 exists: tools/get_gpt2.sh) into <index_file>.lm\n"
         "        --top N             print the best N afterwards (default 10)\n"
+        "        --lm-top K          rescore the best K with GPT-2 (default 1000)\n"
+        "        --no-lm             skip GPT-2 and print the trigram ranking\n"
         "        --max-key-length N  try key lengths 1..N (default 12)\n"
         "        --max-candidates N  skip key lengths that would exceed N candidates in total\n"
         "                            (default 1000000000; candidates are kept on disk: about\n"
@@ -62,9 +71,13 @@ static void usage(const char* prog)
         "  " << prog << " rerank <index_file> <new_index_file> [--model M] [--threads N] [--top N]\n"
         "      rank the candidates of an index by another model (default trigram), without\n"
         "      repeating the search; the two files may be the same\n"
-        "  " << prog << " show <index_file> (--count | --first N | --nth N | --range A B | --rank-of PLAINTEXT)\n"
+        "  " << prog << " rescore <index_file> [--top K] [--print N] [--threads N]\n"
+        "      rescore the best K (default 1000) of an index with GPT-2 into <index_file>.lm\n"
+        "      and print the best N (default 10)\n"
+        "  " << prog << " show <index_file> (--count | --first N | --nth N | --range A B | --rank-of PLAINTEXT\n"
+        "                                  | --lm N)\n"
         "      read candidates from an index by rank (rank 1 = most probable), scored by the\n"
-        "      model the index is ranked by\n";
+        "      model the index is ranked by; --lm N: the best N of the GPT-2 shortlist\n";
     std::exit(1);
 }
 
@@ -72,6 +85,28 @@ static void print(const Candidate& c)
 {
     std::printf("%10zu  key %-12s  %s  %s  score %.2f\n", c.rank, c.key.c_str(), c.plain.c_str(),
                 c.words.c_str(), c.score);
+}
+
+static void print_lm(size_t rank, const Rescored& r)
+{
+    std::printf("%10zu  key %-12s  %-44s  trigram #%-7zu  score %.2f\n", rank, r.key.c_str(), r.sentence.c_str(),
+                r.trigram_rank, r.score);
+}
+
+// Rescore the best `top` of an index with GPT-2, save the shortlist, print the best `print_n`.
+static void run_rescore(IndexReader& idx, const std::string& path, size_t top, size_t print_n, int threads)
+{
+    using Clock = std::chrono::steady_clock;
+    auto t0 = Clock::now();
+    Gpt2 lm(GPT2_DIR);
+    auto t1 = Clock::now();
+    if (threads <= 0) threads = (int)std::max(1u, std::thread::hardware_concurrency());
+    const auto list = rescore(idx, lm, top, threads);
+    write_shortlist(path, idx, list);
+    std::fprintf(stderr, "rescored the best %zu with GPT-2 (%.1fs, loading %.1fs): %s\n", list.size(),
+                 std::chrono::duration<double>(Clock::now() - t1).count(),
+                 std::chrono::duration<double>(t1 - t0).count(), shortlist_path(path).c_str());
+    for (size_t i = 0; i < std::min(print_n, list.size()); i++) print_lm(i + 1, list[i]);
 }
 
 static Dictionary load()
@@ -111,11 +146,14 @@ static int cmd_crack(int argc, char** argv)
 {
     if (argc < 4) usage(argv[0]);
     IndexOptions opt;
-    size_t top = 10;
+    size_t top = 10, lm_top = 1000;
+    bool use_lm = true;
     ModelKind kind = ModelKind::Trigram;
     for (int i = 4; i < argc; i++) {
         std::string a = argv[i];
         if      (a == "--threads"        && i + 1 < argc) opt.threads        = std::stoi(argv[++i]);
+        else if (a == "--lm-top"         && i + 1 < argc) lm_top             = std::stoul(argv[++i]);
+        else if (a == "--no-lm")                          use_lm             = false;
         else if (a == "--model"          && i + 1 < argc) kind               = model_arg(argv[++i]);
         else if (a == "--max-key-length" && i + 1 < argc) opt.max_key_length = std::stoi(argv[++i]);
         else if (a == "--top"            && i + 1 < argc) top                = std::stoul(argv[++i]);
@@ -133,13 +171,21 @@ static int cmd_crack(int argc, char** argv)
     Dictionary dict = load();
     LanguageModel model = load_lm(dict, kind);
     try {
+        std::remove(shortlist_path(argv[3]).c_str());       // a shortlist of the old index
         try { build_index(cipher, dict, model, opt, argv[3]); }
         catch (const std::bad_alloc&) {
             throw std::runtime_error("out of memory in the search; try a smaller --max-key-length");
         }
         IndexReader idx(argv[3], dict, model);
         for (const auto& note : idx.summary().notes) std::fprintf(stderr, "note: %s\n", note.c_str());
-        for (const auto& c : idx.range(1, top)) print(c);
+        if (use_lm && lm_top > 0 && Gpt2::available(GPT2_DIR)) {
+            run_rescore(idx, argv[3], lm_top, top, opt.threads);
+        } else {
+            if (use_lm && lm_top > 0)
+                std::fprintf(stderr, "note: GPT-2 not found in %s (run tools/get_gpt2.sh); "
+                             "showing the %s ranking\n", GPT2_DIR.c_str(), model.name.c_str());
+            for (const auto& c : idx.range(1, top)) print(c);
+        }
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
         return 1;
@@ -163,9 +209,49 @@ static int cmd_rerank(int argc, char** argv)
     Dictionary dict = load();
     LanguageModel model = load_lm(dict, kind);
     try {
+        std::remove(shortlist_path(argv[3]).c_str());       // ranked by the old order
         rerank_index(argv[2], argv[3], dict, model, threads);
         IndexReader idx(argv[3], dict, model);
         for (const auto& c : idx.range(1, top)) print(c);
+    } catch (const std::exception& ex) {
+        std::cerr << ex.what() << '\n';
+        return 1;
+    }
+    return 0;
+}
+
+// The model an existing index is ranked by.
+static LanguageModel index_model(const Dictionary& dict, const std::string& path)
+{
+    ModelKind kind;
+    const std::string name = index_model_name(path);
+    if (name == "zipf")
+        throw std::runtime_error(path + " is ranked by the removed zipf model; update it with `rerank`");
+    if (!parse_model_kind(name, &kind)) throw std::runtime_error(path + ": unknown model " + name);
+    return load_lm(dict, kind);
+}
+
+static int cmd_rescore(int argc, char** argv)
+{
+    if (argc < 3) usage(argv[0]);
+    size_t top = 1000, print_n = 10;
+    int threads = 0;
+    for (int i = 3; i < argc; i++) {
+        std::string a = argv[i];
+        if      (a == "--top"     && i + 1 < argc) top     = std::stoul(argv[++i]);
+        else if (a == "--print"   && i + 1 < argc) print_n = std::stoul(argv[++i]);
+        else if (a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
+        else { std::cerr << "unknown option: " << a << '\n'; usage(argv[0]); }
+    }
+    if (!Gpt2::available(GPT2_DIR)) {
+        std::cerr << "GPT-2 not found in " << GPT2_DIR << " (run tools/get_gpt2.sh)\n";
+        return 1;
+    }
+    Dictionary dict = load();
+    try {
+        LanguageModel model = index_model(dict, argv[2]);
+        IndexReader idx(argv[2], dict, model);
+        run_rescore(idx, argv[2], top, print_n, threads);
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
         return 1;
@@ -178,15 +264,16 @@ static int cmd_show(int argc, char** argv)
     if (argc < 4) usage(argv[0]);
     Dictionary dict = load();
     try {
-        ModelKind kind;
-        const std::string name = index_model_name(argv[2]);
-        if (name == "zipf")
-            throw std::runtime_error(std::string(argv[2]) + " is ranked by the removed zipf model; update it with `rerank`");
-        if (!parse_model_kind(name, &kind)) throw std::runtime_error(std::string(argv[2]) + ": unknown model " + name);
-        LanguageModel model = load_lm(dict, kind);
+        LanguageModel model = index_model(dict, argv[2]);
         IndexReader idx(argv[2], dict, model);
         const std::string mode = argv[3];
         const size_t count = idx.summary().count;
+        if (mode == "--lm") {
+            const size_t n = argc > 4 ? std::stoul(argv[4]) : 10;
+            const auto list = read_shortlist(argv[2], idx);
+            for (size_t i = 0; i < std::min(n, list.size()); i++) print_lm(i + 1, list[i]);
+            return 0;
+        }
         if (mode == "--count") {
             std::printf("ciphertext %s: %zu candidates\n", idx.cipher().c_str(), count);
             for (auto [kl, c] : idx.summary().per_key_length) std::printf("  key length %2d: %zu\n", kl, c);
@@ -222,6 +309,7 @@ int main(int argc, char** argv)
     if (cmd == "-e")    return cmd_encrypt(argv[2]);
     if (cmd == "crack") return cmd_crack(argc, argv);
     if (cmd == "rerank") return cmd_rerank(argc, argv);
+    if (cmd == "rescore") return cmd_rescore(argc, argv);
     if (cmd == "show")  return cmd_show(argc, argv);
     usage(argv[0]);
 }

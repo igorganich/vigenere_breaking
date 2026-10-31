@@ -73,6 +73,7 @@ public:
 
     const std::string&  cipher()  const { return cipher_; }
     const IndexSummary& summary() const { return summary_; }
+    const LanguageModel& model() const { return model_; }
 
     // Candidates of ranks [first, last] (1-based, clipped to the count).
     std::vector<Candidate> range(size_t first, size_t last);

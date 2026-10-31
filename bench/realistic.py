@@ -9,13 +9,14 @@ Each phrase gets one key, alternating between an English word and random letters
 key length of 2..min(12, 0.6 * text length), so the key is never nearly as long as the
 text.  The crack covers every key length, as an attacker who does not know the key length
 would.  Each index is kept in bench/cache/, and every model is measured on the same
-candidates: the cached index is re-ranked with `vigenere rerank` for each model.
+candidates: the cached index is re-ranked with `vigenere rerank` for each model, and for
+`gpt2` the best --lm-top of the trigram ranking are rescored with `vigenere rescore`.
 
 Results go to bench/realistic-MODEL.csv, one per model; a case already in a model's CSV is
 not rerun for that model.
 
 Usage:
-  python3 bench/realistic.py                            # run, models bigram and trigram
+  python3 bench/realistic.py                            # run: trigram, and GPT-2 on its best 1000
   python3 bench/realistic.py --models trigram           # only some models
   python3 bench/realistic.py --cached-only              # skip cases not cracked yet
   python3 bench/realistic.py --summary                  # summaries and a side-by-side
@@ -118,7 +119,7 @@ def crack(case, index, args):
         f.write(case["cipher"])
     t0 = time.monotonic()
     try:
-        r = subprocess.run([args.bin, "crack", cipher_file, partial, "--top", "0",
+        r = subprocess.run([args.bin, "crack", cipher_file, partial, "--top", "0", "--no-lm",
                             "--threads", str(args.threads)],
                            capture_output=True, text=True, timeout=args.timeout,
                            preexec_fn=limit_memory)
@@ -132,6 +133,22 @@ def crack(case, index, args):
     elif os.path.exists(partial):
         os.unlink(partial)
     return status, secs
+
+
+def gpt2_rank(index, plain, args):
+    """Rescore the best args.lm_top of a trigram index with GPT-2; rank of `plain` in the
+    shortlist (0 if it is not in it) and the reading ranked first."""
+    rr = subprocess.run([args.bin, "rescore", index, "--top", str(args.lm_top), "--print", "0",
+                         "--threads", str(args.threads)], capture_output=True, text=True)
+    if rr.returncode != 0:
+        sys.exit(f"rescore failed: {rr.stderr}")
+    with open(index + ".lm") as f:
+        lines = f.read().split("end\n", 1)[1].splitlines()
+    entries = [l.split("\t") for l in lines]          # trigram rank, key, score, sentence
+    letters = lambda sentence: "".join(c for c in sentence.lower() if c.isalpha())
+    rank = next((i + 1 for i, e in enumerate(entries) if letters(e[3]) == plain), 0)
+    return dict(rank=rank, top1_key=entries[0][1] if entries else "",
+                top1_plain=letters(entries[0][3]) if entries else "")
 
 
 def run_one(case, models, args):
@@ -153,12 +170,21 @@ def run_one(case, models, args):
     rows = {}
     for model in models:
         ranked = index
-        if h["model"] != model:              # re-ranking is cheap next to the search
-            ranked = os.path.join(CACHE, f"{case['cipher']}.{model}.idx")
-            rr = subprocess.run([args.bin, "rerank", index, ranked, "--model", model, "--top", "0",
+        base = "trigram" if model == "gpt2" else model     # gpt2 rescores the trigram ranking
+        if h["model"] != base:               # re-ranking is cheap next to the search
+            ranked = os.path.join(CACHE, f"{case['cipher']}.{base}.idx")
+            have = read_header(ranked)
+            ok = have and have["model"] == base and have.get("count") == h["count"] and subprocess.run(
+                [args.bin, "show", ranked, "--nth", "1"], capture_output=True).returncode == 0
+        if h["model"] != base and not ok:     # missing, or ranked with older tables
+            rr = subprocess.run([args.bin, "rerank", index, ranked, "--model", base, "--top", "0",
                                  "--threads", str(args.threads)], capture_output=True, text=True)
             if rr.returncode != 0:
                 sys.exit(f"rerank failed: {rr.stderr}")
+        if model == "gpt2":
+            rows[model] = dict(case, status="ok", n_cands=n, skipped=skipped, seconds=secs,
+                               **gpt2_rank(ranked, case["plain"], args))
+            continue
         rank_out = subprocess.run([args.bin, "show", ranked, "--rank-of", case["plain"]],
                                   capture_output=True, text=True).stdout
         m = re.search(r": rank (\d+) of", rank_out)
@@ -233,7 +259,9 @@ def main():
     ap.add_argument("--threads", type=int, default=0, help="cracker threads (0 = all)")
     ap.add_argument("--timeout", type=float, default=3600, help="seconds per case")
     ap.add_argument("--bin", default=BIN, help="cracker binary")
-    ap.add_argument("--models", default="bigram,trigram", help="comma-separated ranking models")
+    ap.add_argument("--models", default="trigram,gpt2",
+                    help="comma-separated: unigram, bigram, trigram, gpt2 (GPT-2 on the trigram's best)")
+    ap.add_argument("--lm-top", type=int, default=1000, help="candidates GPT-2 rescores")
     ap.add_argument("--cached-only", action="store_true", help="skip cases whose index is not cached")
     ap.add_argument("--summary", action="store_true", help="only print the summaries of the CSVs")
     ap.add_argument("--list", action="store_true", help="only print the cases")

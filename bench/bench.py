@@ -66,7 +66,7 @@ def run_one(case, args):
     t0 = time.monotonic()
     try:
         crack = subprocess.run([args.bin, "crack", cipher_file, index_file, "--top", "0",
-                                "--threads", str(args.threads), "--max-candidates", str(args.max_candidates)],
+                                "--threads", str(args.threads), "--max-candidates", str(args.max_candidates), "--no-lm"],
                                capture_output=True, text=True, timeout=args.timeout)
         secs = time.monotonic() - t0
         if crack.returncode != 0:

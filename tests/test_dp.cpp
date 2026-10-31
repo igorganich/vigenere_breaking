@@ -12,6 +12,7 @@
 #include "cipher.hpp"
 #include "dp.hpp"
 #include "index.hpp"
+#include "rescore.hpp"
 #include "tables.hpp"
 
 static int failures = 0;
@@ -314,6 +315,36 @@ int main()
         for (const char* suffix : {".tmp", ".keys.tmp", ".run0.tmp", ".run1.tmp"})
             clean = clean && access((other + suffix).c_str(), F_OK) != 0;
         check(clean, "disk sort: temporary files removed");
+        unlink(other.c_str());
+    }
+    {
+        // GPT-2 stage without the model: the sentences it reads and the shortlist file.
+        check(lm_sentence("iamtoldtogo", "[i:11][am:209][told:310][to:4][go:141]") == "I am told to go." &&
+              lm_sentence("thecatsat", "[the:1][cat:3109][sat:2378]") == "The cat sat." &&
+              lm_sentence("theqcat", "[the:1]q[cat:3109]") == "Theqcat.",
+              "lm_sentence: words, capital I, sentence case, stray letters fall back to the plaintext");
+        const std::string cipher = encrypt("helloworld", "code"), other = path + ".lm_test";
+        IndexOptions opt;
+        opt.max_key_length = 6;
+        build_index(cipher, dict, trigram, opt, other);
+        std::vector<Rescored> list;
+        {
+            IndexReader idx(other, dict, trigram);
+            for (const auto& c : idx.range(1, 5))
+                list.push_back({c.rank, c.key, lm_sentence(c.plain, c.words), -c.score / 3});
+            write_shortlist(other, idx, list);
+            const auto back = read_shortlist(other, idx);
+            bool same = back.size() == list.size();
+            for (size_t i = 0; same && i < list.size(); i++)
+                same = back[i].trigram_rank == list[i].trigram_rank && back[i].key == list[i].key &&
+                       back[i].sentence == list[i].sentence && back[i].score == list[i].score;
+            check(same, "shortlist: round trip (ranks, keys, sentences, scores bit for bit)");
+        }
+        rerank_index(other, other, dict, bigram, threads);
+        bool threw = false;
+        try { IndexReader idx(other, dict, bigram); read_shortlist(other, idx); } catch (const std::exception&) { threw = true; }
+        check(threw, "shortlist: rejected once its index is re-ranked");
+        unlink(shortlist_path(other).c_str());
         unlink(other.c_str());
     }
     {

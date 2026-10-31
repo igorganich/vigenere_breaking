@@ -2,22 +2,25 @@
 
 ## Ranking
 
-The trigram model ranks the true plaintext first for 95% of the phrases in
-`bench/realistic.py`. Its misses are texts that are short for their key, where many fluent
-readings fit and the key prior decides much of the order: "money talks" (10 letters, key
-length 6) is 11th, "the coffee is too hot" (15 letters, key length 10) 4th, and the stress
-case (`bench/stress.sh`, 25 letters, key length 12) 9th. Ideas, most promising first; each
+With GPT-2 rescoring the trigram's best 1,000, the true plaintext comes first for 96% of the
+phrases in `bench/realistic.py` (81 of 84; the other two are out of the search's reach, and
+"take the last train" is 3rd behind the equally good "take the fast train"). Ideas; each
 can be measured on the cached searches with `python3 bench/realistic.py --cached-only`:
 
-- **Sentence start.** Most messages start a sentence. P(w₁ | start) and P(w₂ | start w₁)
-  from the subtitle corpus would favour "i am ..." over "a jury ...".
-- **Key prior.** −key_length · ln 26 assumes random keys. Keys that are English words
-  (`map`, `whilst`) could get a mixture prior, P(key) = ½ · 26^−L + ½ · P_word(key).
-- **Larger trigram table.** 978k triples (count ≥ 15, 18 MB) from 179M words. More corpus
-  and a lower cutoff raise coverage of real phrases (the table holds 149 of the 211 word
-  triples in `bench/phrases.txt`), at the cost of a bigger file.
-- **Harder benchmark cases.** Most phrases in `bench/phrases.txt` are now ranked first, so
-  the benchmark separates models poorly. Cases with keys close to the text length would.
+- **Harder benchmark cases.** Almost every phrase in `bench/phrases.txt` is now ranked
+  first, so the benchmark no longer separates models. Cases with keys close to the text
+  length would, and would show whether a shortlist of 1,000 is always wide enough (the
+  worst trigram rank of a true plaintext so far is 11).
+- **A larger neural model.** GPT-2 small (124M parameters) is the cheapest that works. A
+  stronger one (GPT-2 medium, or a recent small model) may separate readings that GPT-2
+  small finds equally good, at a few times the cost per sentence; the loader and the
+  tokenizer are GPT-2 specific.
+- **Faster GPT-2.** About 5 s per 1,000 sentences on 20 threads. A persistent thread pool
+  (threads are started per matrix product now) and smaller weights (bf16 or 8-bit) would
+  cut that, and allow wider shortlists.
+- **Larger trigram table.** 978k triples (count ≥ 15, 18 MB) from 179M words. It now only
+  decides what reaches GPT-2; more corpus and a lower cutoff would raise the trigram rank
+  of real phrases further.
 
 ## Custom words: `--dict FILE`
 
@@ -47,4 +50,8 @@ hundred words, not a 300,000-word list.
   1 billion) bounds disk space and time, not memory, and can be raised.
 - **Folding the language model into the search** (pruning unlikely key prefixes). It would
   lose the guarantee that the true plaintext is among the candidates; the search stays
-  exhaustive and the model only ranks.
+  exhaustive and the models only rank.
+- **A key prior favouring English-word keys.** Every key is scored as random letters
+  (−key_length · ln 26). Preferring keys that are words would settle cases like "take the
+  last train" (`important`) vs "take the fast train" (`importatt`), but the ranking is meant
+  to judge the plaintext, not guess how keys are chosen.

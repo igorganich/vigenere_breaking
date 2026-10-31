@@ -6,7 +6,7 @@ set -uo pipefail
 ulimit -v 10000000    # 10 GB: a runaway case fails instead of exhausting the machine
 # The suite keeps the pre-disk cap of 150 million candidates: it works in $TMPDIR (often a
 # RAM disk) and must stay short; the skip tests below are calibrated to it.
-CAP=(--max-candidates 150000000)
+CAP=(--max-candidates 150000000 --no-lm)   # GPT-2 has its own tests at the end
 
 BIN="$(cd "$(dirname "$0")/.." && pwd)/bin/vigenere"
 WORK=$(mktemp -d)
@@ -82,7 +82,7 @@ if "$BIN" crack "$WORK/long.txt" "$WORK/long.idx" 2>/dev/null; then fail "reject
 else                                                              pass "rejects a 26-letter ciphertext"
 fi
 printf 'abcabcabcab' > "$WORK/repeat.txt"
-if "$BIN" crack "$WORK/repeat.txt" "$WORK/repeat.idx" --top 0 --max-key-length 4 2>/dev/null &&
+if "$BIN" crack "$WORK/repeat.txt" "$WORK/repeat.idx" --top 0 --max-key-length 4 --no-lm 2>/dev/null &&
    "$BIN" show "$WORK/repeat.idx" --count | grep -q "key length 3 skipped"; then
     pass "skips a key length the ciphertext repeats with"
 else
@@ -90,6 +90,29 @@ else
 fi
 if "$BIN" show "$WORK/plain.txt" --count 2>/dev/null; then fail "show rejects a file that is not an index"
 else                                                       pass "show rejects a file that is not an index"
+fi
+
+# ── GPT-2 stage (needs models/gpt2, from tools/get_gpt2.sh) ─────────────────────
+# "money talks" with key "merely": the trigram model ranks it 11th, GPT-2 first.
+if [[ -f "$(dirname "$BIN")/../models/gpt2/model.safetensors" ]]; then
+    printf 'moneytalks' > "$WORK/plain.txt"
+    echo merely | "$BIN" -e "$WORK/plain.txt" 2>/dev/null > "$WORK/cipher.txt"
+    best=$("$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --top 1 --max-candidates 150000000 2>/dev/null)
+    if [[ $best == *"key merely"*"Money talks."* ]] &&
+       "$BIN" show "$WORK/run.idx" --lm 1 | grep -q "key merely .*Money talks\."; then
+        pass "GPT-2: money talks / merely ranked first ($("$BIN" show "$WORK/run.idx" --rank-of moneytalks | sed 's/.*: //') by trigram)"
+    else
+        fail "GPT-2: money talks / merely not ranked first: $best"
+    fi
+    "$BIN" rerank "$WORK/run.idx" "$WORK/run.idx" --model bigram --top 0 2>/dev/null
+    if [[ ! -e "$WORK/run.idx.lm" ]] && ! "$BIN" show "$WORK/run.idx" --lm 1 2>/dev/null; then
+        pass "GPT-2: the shortlist is dropped when the index is re-ranked"
+    else
+        fail "GPT-2: a stale shortlist survived re-ranking"
+    fi
+    rm -f "$WORK/run.idx.lm"
+else
+    echo "SKIP  GPT-2 tests: models/gpt2 not found (run tools/get_gpt2.sh)"
 fi
 
 # Clean up: the files this script created in $WORK, one by one, then the directory.

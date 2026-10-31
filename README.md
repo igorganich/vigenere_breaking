@@ -1,20 +1,22 @@
 # Vigenère Cipher Breaker
 
-A C++ tool that breaks **ultra-short** Vigenère ciphertexts (2–25 letters) without knowing the key. It works in two stages:
+A C++ tool that breaks **ultra-short** Vigenère ciphertexts (2–25 letters) without knowing the key. It works in three stages:
 
 1. **Search.** For every key length from 1 to 12 it finds **every** key whose plaintext splits completely into dictionary words. The search is exhaustive, so the true plaintext is always among the candidates, as long as its words are in the dictionary and its key length was not skipped.
-2. **Rank.** It scores every candidate with a word-trigram language model and stores them, best first, in an index file you can query by rank: the best 10, the millionth, or any range.
+2. **Rank.** It scores every candidate (tens to hundreds of millions) with a word-trigram language model and stores them, best first, in an index file you can query by rank: the best 10, the millionth, or any range.
+3. **Rescore.** GPT-2, run inside the tool, reads the best 1,000 as whole sentences and reorders them by how much sense they make.
 
-On 84 realistic short phrases (messages, instructions, sayings), the true plaintext is ranked first in 95% of cases.
+On 84 realistic short phrases (messages, instructions, sayings), the true plaintext comes first in 96% of cases. On the hardest test, 25 letters with a 12-letter key and 55 million candidates, the trigram model alone puts it 9th behind fluent-looking word salad; GPT-2 puts it first:
 
 ```
 $ bin/vigenere crack cipher.txt run.idx --top 3
 ...
-ranked 631850161 candidates by trigram (131.5s, sorted on disk in 10 runs)
-wrote run.idx: 631850161 candidates, 5054.8 MB (533.2s in total)
-         1  key increasingly  mybrotherlivesinlondon  [my:81][brother:787][lives:724][in:5][london:748]  score -61.95
-         2  key bxfeapmmdgp   toyesenablespageactive  [to:4][yes:1123][enables:6534][page:1139][active:1151]  score -73.29
-         3  key increasinglg  mybrotherlinesinlondon  [my:81][brother:787][lines:1008][in:5][london:748]  score -74.02
+ranked 55577417 candidates by trigram (10.2s)
+wrote run.idx: 55577417 candidates, 444.6 MB (177.8s in total)
+rescored the best 1000 with GPT-2 (4.7s, loading 1.0s): run.idx.lm
+         1  key qzxwvkjplmrt  I am told to go and see it by four.           trigram #9        score -87.80
+         2  key szlnvgumrzyf  Gay cops with old enemies ship.               trigram #53       score -96.56
+         3  key mzllxgbubyn   May employ ushered triple tow.                trigram #6        score -99.69
 ```
 
 ---
@@ -24,12 +26,13 @@ wrote run.idx: 631850161 candidates, 5054.8 MB (533.2s in total)
 1. [Background](#1-background)
 2. [Stage 1: the Search](#2-stage-1-the-search)
 3. [Stage 2: Ranking](#3-stage-2-ranking)
-4. [Building and Usage](#4-building-and-usage)
-5. [The Index File](#5-the-index-file)
-6. [Performance and Resources](#6-performance-and-resources)
-7. [Limitations](#7-limitations)
-8. [Tests and Benchmarks](#8-tests-and-benchmarks)
-9. [Data Sources](#9-data-sources)
+4. [Stage 3: Rescoring with GPT-2](#4-stage-3-rescoring-with-gpt-2)
+5. [Building and Usage](#5-building-and-usage)
+6. [The Index File](#6-the-index-file)
+7. [Performance and Resources](#7-performance-and-resources)
+8. [Limitations](#8-limitations)
+9. [Tests and Benchmarks](#9-tests-and-benchmarks)
+10. [Data Sources](#10-data-sources)
 
 ---
 
@@ -46,13 +49,13 @@ p[i] = (c[i] - k[i mod L] + 26) mod 26
 
 ### 1.2 Why short ciphertexts are hard
 
-Classic attacks (index of coincidence, frequency analysis, n-gram hill-climbing) need enough text per key letter to see English statistics. With 8–25 letters and a key of up to 12, each key letter decodes only one to three plaintext letters, so statistics say almost nothing. What remains is the constraint that the plaintext must be made of real words. This tool searches on that constraint directly and exhaustively, and uses statistics only to order the readings it found.
+Classic attacks (index of coincidence, frequency analysis, n-gram hill-climbing) need enough text per key letter to see English statistics. With 8–25 letters and a key of up to 12, each key letter decodes only one to three plaintext letters, so statistics say almost nothing. What remains is the constraint that the plaintext must be made of real words. This tool searches on that constraint directly and exhaustively, and uses language models only to order the readings it found.
 
 ### 1.3 Assumptions
 
 - Ciphertext of **2–25 letters** (non-letters are stripped; longer input is rejected).
 - Key length **1–12**.
-- The plaintext consists **entirely of dictionary words**: the bundled word list of 44,275 words plus "a" and "i", written without spaces or punctuation ("dont", not "don't"). A plaintext containing a word outside the list is not found (see [§7](#7-limitations)).
+- The plaintext consists **entirely of dictionary words**: the bundled word list of 44,275 words plus "a" and "i", written without spaces or punctuation ("dont", not "don't"). A plaintext containing a word outside the list is not found (see [§8](#8-limitations)).
 
 ---
 
@@ -91,7 +94,7 @@ This is a dynamic program over key columns (`src/dp.cpp`):
 `crack` skips a key length, with a note, in two cases:
 
 - **The ciphertext repeats with period `L`.** Then the plaintext must repeat too, and any repeating English text is an equally good answer: the key length carries no information.
-- **More candidates than `--max-candidates`** (default 1 billion, for all key lengths together). This happens when the key is nearly as long as the text: for key length 9 on 10 letters, only one plaintext letter is tied to another, so almost any word sequence fits and listing them is close to enumerating English. The limit bounds disk space and time (candidates are kept on disk, [§6](#6-performance-and-resources)), so it can be raised.
+- **More candidates than `--max-candidates`** (default 1 billion, for all key lengths together). This happens when the key is nearly as long as the text: for key length 9 on 10 letters, only one plaintext letter is tied to another, so almost any word sequence fits and listing them is close to enumerating English. The limit bounds disk space and time (candidates are kept on disk, [§7](#7-performance-and-resources)), so it can be raised.
 
 ---
 
@@ -131,7 +134,7 @@ The split is found by a second dynamic program (`src/cipher.hpp`), separate from
 
 ### 3.3 Other models
 
-`--model bigram` (word pairs as above, with the last word as state) and `--model unigram` (single words) remain available for comparison. On the ranking benchmark ([§8](#8-tests-and-benchmarks), 84 phrases) and the stress case:
+`--model bigram` (word pairs as above, with the last word as state) and `--model unigram` (single words) remain available for comparison. On the ranking benchmark ([§9](#9-tests-and-benchmarks), 84 phrases) and the stress case:
 
 | Model | Ranked first | Mean reciprocal rank | Stress case (`bench/stress.sh`) |
 |---|---|---|---|
@@ -143,24 +146,59 @@ Of the 15 phrases where trigram and bigram disagree, trigram ranks 14 higher; fo
 
 ---
 
-## 4. Building and Usage
+## 4. Stage 3: Rescoring with GPT-2
 
-### 4.1 Requirements
+### 4.1 Why
+
+The trigram model sees three words at a time. "Rate me wow name medicine my or" is made of plausible pieces, and nothing in a three-word window says the whole is nonsense. Whether a sentence makes sense is a property of the whole sentence, so the best readings are read again by a neural language model that sees all of it.
+
+### 4.2 How
+
+The best 1,000 candidates of the trigram ranking (`--lm-top`) are turned into sentences from their word split ("I am told to go and see it by four.": spaces, a capital first letter, capital "I", a full stop) and ranked by
+
+```
+score = log P_GPT-2(sentence) − key_length · ln 26
+```
+
+the same posterior as before with a better estimate of P(plaintext), ties broken by trigram rank. The model is OpenAI's GPT-2 small (124 million parameters), and `log P` is the sum of the log-probabilities of the sentence's tokens, the first one after GPT-2's end-of-text token. The result is written next to the index as `<index>.lm`; the index keeps the trigram order, so every candidate stays reachable.
+
+This is a cascade, not a filter: the search still lists every candidate and the trigram model still orders all of them, and GPT-2 only reorders the shortlist. On the ranking benchmark the worst trigram rank of a true plaintext is 11, so the shortlist of 1,000 holds every one of them.
+
+GPT-2 runs inside the tool (`src/gpt2.cpp`), with no dependencies: it reads the Hugging Face release (`model.safetensors`, `vocab.json`, `merges.txt`) directly and implements GPT-2's byte-level BPE tokenizer and its 12-layer transformer in C++, with an AVX2/FMA matrix kernel and a portable fallback. Its scores match the reference implementation (PyTorch, Hugging Face `transformers`) to within 0.0002 nats per sentence, and do not depend on the number of threads or on which sentences share a batch. `tools/get_gpt2.sh` downloads the model (about 550 MB, pinned to one revision and checked by SHA-256) into `models/gpt2/`; without it, `crack` says so and prints the trigram ranking.
+
+### 4.3 Results
+
+On the ranking benchmark (84 phrases; the same two are out of reach of the search for both):
+
+| | Ranked first | Mean reciprocal rank | Stress case |
+|---|---|---|---|
+| trigram | 80 of 84 (95.2%) | 0.956 | rank 9 |
+| **trigram, then GPT-2 on the best 1,000** | **81 of 84 (96.4%)** | **0.968** | **rank 1** |
+
+GPT-2 moves "money talks" from 11th to first and "the coffee is too hot" from 4th to first. It moves one phrase down: "take the last train" (key `important`) is 3rd behind "Take the fast train." (key `importatt`), an equally good sentence that only the key can tell apart.
+
+---
+
+## 5. Building and Usage
+
+### 5.1 Requirements
 
 - GCC or Clang with C++17 support
 - Python 3 (benchmarks and table generation only)
+- About 550 MB of disk and 0.8 GB of memory for GPT-2 (optional)
 
-### 4.2 Building
+### 5.2 Building
 
 ```bash
 make          # optimized build → bin/vigenere
 make test     # unit tests + end-to-end tests
 make clean
+bash tools/get_gpt2.sh   # GPT-2 for stage 3 → models/gpt2/ (optional, about 550 MB)
 ```
 
 The repository holds no binary: build it on the machine that runs it. The build uses `-march=native`, so the binary is tuned to that CPU and may not run on another one; rebuild there instead of copying it. The binary finds the word list and model tables in `txt/` next to its own `bin/` directory, whatever the working directory.
 
-### 4.3 Encrypting
+### 5.3 Encrypting
 
 ```bash
 echo secret | bin/vigenere -e plain.txt > cipher.txt
@@ -168,7 +206,7 @@ echo secret | bin/vigenere -e plain.txt > cipher.txt
 
 The key is read from stdin; plaintext and key are reduced to lowercase letters.
 
-### 4.4 Cracking
+### 5.4 Cracking
 
 ```bash
 bin/vigenere crack cipher.txt run.idx [options]
@@ -181,6 +219,8 @@ bin/vigenere crack cipher.txt run.idx [options]
                     (default 1000000000; candidates are kept on disk next to the
                     index: about 24 bytes each while building, 8 in the index)
 --model M           ranking model: trigram (default), bigram or unigram
+--lm-top K          rescore the best K with GPT-2 (default 1000)
+--no-lm             skip GPT-2 and print the trigram ranking
 --threads N         worker threads (default: all)
 ```
 
@@ -198,41 +238,51 @@ note: key length 9 skipped: more than 116754002 candidates (too ambiguous to lis
          2  key zhtp          abuntingon  [a:5][bunting:20356][on:10]  score -35.30
 ```
 
-(This run used `--max-candidates 150000000`; with the default, key length 9 is listed too.) Each line shows the rank, the key, the plaintext, its word split with each word's frequency rank in the word list, and the score.
+(This run used `--max-candidates 150000000 --no-lm`; with the default, key length 9 is listed too, and the best candidates are then rescored with GPT-2 and printed as sentences, as in the example at the top.) Each line shows the rank, the key, the plaintext, its word split with each word's frequency rank in the word list, and the score.
 
-### 4.5 Reading the index
+### 5.5 Reading the index
 
 ```bash
 bin/vigenere show run.idx --count                 # candidates per key length, notes
 bin/vigenere show run.idx --first 20              # the 20 most probable
 bin/vigenere show run.idx --nth 1000000           # one candidate by rank
 bin/vigenere show run.idx --range 5000 5100       # a range of ranks
-bin/vigenere show run.idx --rank-of helloworld    # where a given plaintext ranks
+bin/vigenere show run.idx --rank-of helloworld    # where a given plaintext ranks (trigram)
+bin/vigenere show run.idx --lm 20                 # the best 20 after GPT-2 (run.idx.lm)
 ```
 
 Lookups by rank are instant at any size. `--rank-of` scans the file (a few seconds for tens of millions of candidates). Scores are recomputed with the model the index is ranked by.
 
-### 4.6 Re-ranking an index
+### 5.6 Re-ranking an index
 
 ```bash
 bin/vigenere rerank run.idx run-bigram.idx --model bigram   # default model: trigram
 ```
 
-Ranks the candidates of an existing index by another model and writes a new index (or overwrites the same file), without repeating the search: for 14 million candidates about 3 s with `bigram` and 4 s with `trigram` on 20 threads. Loading the trigram tables adds about 1.5 s to every command that uses them.
+Ranks the candidates of an existing index by another model and writes a new index (or overwrites the same file), without repeating the search: for 14 million candidates about 3 s with `bigram` and 4 s with `trigram` on 20 threads. Loading the trigram tables adds about 1.5 s to every command that uses them. The GPT-2 shortlist of the old ranking is removed.
+
+### 5.7 Rescoring with GPT-2
+
+```bash
+bin/vigenere rescore run.idx --top 5000 --print 20
+```
+
+Rescores the best `--top` (default 1000) of an existing index with GPT-2 into `run.idx.lm` and prints the best `--print` (default 10). `crack` does this itself unless `--no-lm` is given or the model is missing.
 
 ---
 
-## 5. The Index File
+## 6. The Index File
 
 A 4096-byte text header, then one 8-byte record per candidate, sorted by score (rank 1 first). Rank `r` is at byte `4096 + 8·(r − 1)`.
 
 - **Header** (text lines): `VIGIDX 1`, the ciphertext, a fingerprint of the word list, the ranking model and a fingerprint of its tables, the maximum key length, the candidate count, the count per key length, and notes for skipped key lengths. An index can only be read with the word list it was built with and the model tables it was ranked with; `rerank` brings it up to date.
 - **Record:** the key length in the top 6 bits and the key packed base 26 below. Plaintext, word split and score are recomputed from the key when read.
 - **Older indexes** have no model line; they were ranked by the removed Zipf model. `show` rejects them; `rerank` converts them.
+- **GPT-2 shortlist** (`<index>.lm`, text): a header naming the ciphertext, candidate count and ranking model of its index (`show --lm` refuses a shortlist that no longer matches), then one line per candidate, best first: trigram rank, key, score, sentence.
 
 ---
 
-## 6. Performance and Resources
+## 7. Performance and Resources
 
 Measured on a 20-thread machine with 15 GB of memory.
 
@@ -242,9 +292,9 @@ Measured on a 20-thread machine with 15 GB of memory.
 | `helloworld` (10 letters, `--max-candidates 150000000`) | `secret` | 33,245,998 (key length 9 skipped) | rank 1 | 48 s | 266 MB |
 | `checktheseconddrawer` (20 letters) | `fczrzibvcca` | 280,914,433 (key length 12 skipped) | rank 1 | 7 min 8 s | 2.2 GB |
 | `mybrotherlivesinlondon` (22 letters) | `increasingly` | 631,850,161 | rank 1 | 8 min 53 s | 5.1 GB |
-| `iamtoldtogoandseeitbyfour` (25 letters, `bench/stress.sh`) | `qzxwvkjplmrt` | 55,577,417 | rank 9 | 2 min 58 s | 445 MB |
+| `iamtoldtogoandseeitbyfour` (25 letters, `bench/stress.sh`) | `qzxwvkjplmrt` | 55,577,417 | rank 9 (GPT-2: 1) | 2 min 58 s | 445 MB |
 
-Key lengths 11 and 12 take almost all the time on long texts; shorter key lengths take seconds. The word-by-word constraint search this tool started with was extrapolated to take about two months for the stress case.
+True-plaintext ranks are the trigram's; times are for the search and the trigram ranking. GPT-2 adds about 6 s: 1 s to load and 4.7 s to read 1,000 sentences (0.8 GB of memory). Key lengths 11 and 12 take almost all the time on long texts; shorter key lengths take seconds. The word-by-word constraint search this tool started with was extrapolated to take about two months for the stress case.
 
 **Memory and disk.** Candidates never sit in memory. The search writes them to a temporary file next to the index, and ranking sorts them on disk: chunks of 64 million candidates (about 1 GB) are scored and sorted, written as sorted runs, and merged into the index. Input that fits in one chunk is written directly; the result is the same file either way.
 
@@ -254,16 +304,17 @@ Key lengths 11 and 12 take almost all the time on long texts; shorter key length
 
 ---
 
-## 7. Limitations
+## 8. Limitations
 
 - **Dictionary coverage.** Every word of the plaintext must be in `txt/english_words.txt`. The list covers more than one might expect ("dont", "london", "email") but misses, for example, "usa", "covid", "smartphone", "wifi" and American "color".
 - **Ambiguity.** When the text is short relative to the key, enormous numbers of word sequences fit, and no search can tell them apart: 25 letters with key length 12 give 48 million candidates, 22 letters with key length 12 nearly 600 million. Below about 1.5 × the key length (e.g. 13 letters with key length 10) a ciphertext has no unique reading, and such key lengths can exceed even the default limit of a billion candidates. Only the ranking can choose.
-- **Ranking.** The trigram model fails mainly on texts that are short for their key: "money talks" (10 letters, key length 6) is 11th behind "as that mean", "the coffee is too hot" (15 letters, key length 10) 4th behind "the alien customers", and on the stress case "a jury us coupe frog the autumn" is first. There the key prior decides much of the order: the stress plaintext's 12-letter key costs about 10 nats more than the 9-letter key of the reading ranked first. Ideas are in [TODO.md](TODO.md).
+- **Ranking.** With GPT-2, the remaining mistakes are between readings that are all good English: "take the last train" (key `important`) is 3rd behind "Take the fast train." (key `importatt`). Only the key could tell them apart, and the tool treats every key as random letters. Without GPT-2, the trigram model fails mainly on texts that are short for their key: "money talks" (10 letters, key length 6) is 11th behind "as that mean", and the stress case 9th behind "a jury us coupe frog the autumn".
+- **GPT-2's shortlist** holds the trigram's best 1,000. A true plaintext the trigram model ranks lower is not rescored; `rescore --top` widens the shortlist (about 5 s per 1,000).
 - **Skipped key lengths** (repeating ciphertext, too many candidates) are listed with `show --count`.
 
 ---
 
-## 8. Tests and Benchmarks
+## 9. Tests and Benchmarks
 
 ```bash
 make test                    # both test suites
@@ -271,22 +322,24 @@ bin/test_dp                  # unit tests
 bash tests/run_tests.sh      # end-to-end tests
 bash bench/stress.sh         # 25-letter, key-length-12 stress case → bench/stress.log
 python3 bench/bench.py       # randomized grid → bench/results.csv
-python3 bench/realistic.py   # real short phrases → bench/realistic-{bigram,trigram}.csv
+python3 bench/realistic.py   # real short phrases → bench/realistic-{trigram,gpt2}.csv
 ```
 
-- **Unit tests** (`tests/test_dp.cpp`):
+- **Unit tests** (`tests/test_dp.cpp`, `tests/test_gpt2.cpp`):
   - the search against an independent brute force for key lengths 1–5 on texts of 8, 12, 19 and 22 letters (2–5 rows, words crossing rows);
   - the language models: probabilities sum to 1, the split DPs against a brute force over all splits, the reported split has the reported score, word order matters to `bigram` but not `unigram`, a known triple beats its bigram estimate;
   - the index file: round trip, score order, one entry per plaintext, `rank_of`, skipped key lengths, rejection of non-index files;
   - `rerank`: same candidates in the new order, the model recorded and checked, re-ranking back in place restores the original file byte for byte, an older index is rejected by the reader but converted;
-  - building on disk: tiny sort chunks force sorted runs and a merge and must give the same file byte for byte, a key length over the limit leaves nothing behind, no temporary files remain.
-- **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–9 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts. The suite uses `--max-candidates 150000000`, stops texts over 16 letters at key length 10 to stay short (the stress script covers the full range), and caps its own memory at 10 GB.
+  - building on disk: tiny sort chunks force sorted runs and a merge and must give the same file byte for byte, a key length over the limit leaves nothing behind, no temporary files remain;
+  - the GPT-2 stage: the sentences it reads, the shortlist file (round trip, rejected once its index is re-ranked);
+  - GPT-2 itself (skipped without `models/gpt2`): token ids and log-probabilities of seven sentences against the reference implementation, the same values bit for bit with 1 or 20 threads, alone or in a batch, and over several batches.
+- **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–9 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts, and (with `models/gpt2`) the GPT-2 stage: "money talks" with key `merely`, 11th by trigram, must come first, and re-ranking must drop the stale shortlist. The suite uses `--max-candidates 150000000 --no-lm` except in the GPT-2 tests, stops texts over 16 letters at key length 10 to stay short (the stress script covers the full range), and caps its own memory at 10 GB.
 - **Search benchmark** (`bench/bench.py`): plaintexts from common words (8–24 letters) with random keys (2–12 letters); records the rank of the true plaintext, the candidate count and the time. These plaintexts are word salad, so this benchmark measures the search, not the ranking.
-- **Ranking benchmark** (`bench/realistic.py`): 105 real short phrases (`bench/phrases.txt`: messages, instructions, sayings, plain sentences; 9–23 letters), each with one key, alternately a common English word or random letters, of length 2 to 0.6 × the text length. Reports found / top-1 / top-10 / top-100 / top-1000, mean reciprocal rank and median rank, overall, by key type and by text length, and lists every plaintext ranked below 10 next to the reading ranked first. Each search is cached in `bench/cache/` and re-ranked by every model in `--models` (default `bigram,trigram`), so models are compared on the same candidates; `--summary` adds a side-by-side list of the phrases where they disagree, and `--cached-only` measures a new model without searching again.
+- **Ranking benchmark** (`bench/realistic.py`): 105 real short phrases (`bench/phrases.txt`: messages, instructions, sayings, plain sentences; 9–23 letters), each with one key, alternately a common English word or random letters, of length 2 to 0.6 × the text length. Reports found / top-1 / top-10 / top-100 / top-1000, mean reciprocal rank and median rank, overall, by key type and by text length, and lists every plaintext ranked below 10 next to the reading ranked first. Each search is cached in `bench/cache/` and re-ranked by every model in `--models` (`unigram`, `bigram`, `trigram`, and `gpt2` for GPT-2 on the trigram's best `--lm-top`; default `trigram,gpt2`), so models are compared on the same candidates; `--summary` adds a side-by-side list of the phrases where they disagree, and `--cached-only` measures a new model without searching again.
 
 ---
 
-## 9. Data Sources
+## 10. Data Sources
 
 - **Word list:** [corncob_lowercase.txt](http://www.mieliestronk.com/corncob_lowercase.txt), in frequency order.
 - **Word and word-pair counts:** [count_1w.txt and count_2w.txt](https://norvig.com/ngrams/) by Peter Norvig, from the Google Web Trillion Word Corpus, reduced to the word list by `tools/make_ngram_tables.py`:
@@ -300,3 +353,4 @@ python3 bench/realistic.py   # real short phrases → bench/realistic-{bigram,tr
     | ./count_trigrams txt/english_words.txt 15 txt/english_trigrams.txt txt/english_trigram_contexts.txt
   ```
   Subtitles were chosen over encyclopedic text because short ciphertexts are mostly short conversational messages. Tatoeba was left out on purpose: its everyday sentences overlap the ranking benchmark's phrases.
+- **GPT-2 small:** [openai-community/gpt2](https://huggingface.co/openai-community/gpt2) on Hugging Face (OpenAI; A. Radford et al., 2019, *Language Models are Unsupervised Multitask Learners*; MIT licence), revision `607a30d`, downloaded by `tools/get_gpt2.sh`.
