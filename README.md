@@ -201,11 +201,13 @@ bin/test_dp             # unit tests
 bash tests/run_tests.sh # end-to-end tests
 bash bench/stress.sh    # 25-letter, key-length-12 stress case → bench/stress.log
 python3 bench/bench.py  # randomized grid → bench/results.csv
+python3 bench/realistic.py  # real short phrases → bench/realistic.csv
 ```
 
 - **Unit tests** (`tests/test_dp.cpp`): the search against an independent brute force for key lengths 1–5 on texts of 8, 12, 19 and 22 letters (2–5 rows, words crossing rows), and the index file: round trip, score order, one entry per plaintext, `rank_of`, skipped key lengths, rejection of non-index files.
 - **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–8 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts. Texts over 16 letters stop at key length 10 to keep the suite shorter; the stress script covers the full range. The suite caps its own memory at 10 GB.
-- **Benchmark** (`bench/bench.py`): plaintexts from common words (8–24 letters) with random keys (2–12 letters); records the rank of the true plaintext, the candidate count and the time.
+- **Benchmark** (`bench/bench.py`): plaintexts from common words (8–24 letters) with random keys (2–12 letters); records the rank of the true plaintext, the candidate count and the time. These plaintexts follow the scorer's own unigram model, so this benchmark cannot show whether a better language model helps.
+- **Realistic benchmark** (`bench/realistic.py`): 105 real short phrases (`bench/phrases.txt`: messages, instructions, sayings, plain sentences; 9–23 letters), each with one key, alternately a common English word or random letters, of length 2 to 0.6 × the text length. Reports found / top-1 / top-10 / top-100 / top-1000, mean reciprocal rank and median rank, overall, by key type and by text length, and lists every plaintext ranked below 10 next to the reading ranked first. Indexes are kept in `bench/cache/` so a new ranking model can be measured on the same candidates without repeating the search.
 
 ---
 

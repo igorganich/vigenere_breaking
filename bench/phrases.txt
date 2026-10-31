@@ -1,0 +1,117 @@
+# Realistic short plaintexts for bench/realistic.py: one per line, spaces and punctuation
+# are removed before encryption.  A mix of everyday messages, instructions, sayings and
+# plain sentences, 8-25 letters once spaces are removed.  Lines with a word outside the
+# dictionary are reported and skipped by the benchmark.
+
+# Messages
+meet me at noon
+call me tonight
+see you tomorrow
+i miss you so much
+where are you now
+running late sorry
+come home soon
+happy birthday to you
+thank you for everything
+i will be there soon
+can we talk later
+dinner is ready
+the door is open
+leave the key under the mat
+wait for me outside
+do not trust him
+the package has arrived
+we need more money
+send help quickly
+meet at the old bridge
+bring the documents
+the plan has changed
+stay where you are
+i found the treasure
+they know about us
+burn this letter
+we leave at dawn
+the meeting is cancelled
+call your mother
+good luck tomorrow
+
+# Instructions and statements
+attack at dawn
+retreat to the hills
+hold the line
+move to the north gate
+the eagle has landed
+the enemy is coming
+guard the east wall
+open the safe tonight
+the password is blue
+check the second drawer
+take the last train
+go to the station
+watch your back
+the target is moving
+abort the mission now
+the money is in the bank
+look behind the painting
+the spy is a woman
+follow the river south
+the ship sails at midnight
+
+# Sayings and common phrases
+time is money
+knowledge is power
+better late than never
+practice makes perfect
+actions speak louder
+all is well
+less is more
+seeing is believing
+honesty is the best policy
+the early bird
+no pain no gain
+easy come easy go
+love conquers all
+history repeats itself
+life is short
+silence is golden
+money talks
+the truth will out
+every dog has its day
+home sweet home
+out of sight out of mind
+first come first served
+two heads are better
+when in rome
+the end is near
+
+# Plain sentences
+the weather is nice today
+my brother lives in london
+she reads a book every night
+the children are playing
+we bought a new car
+he works at the hospital
+the coffee is too hot
+i lost my phone again
+the train was very late
+our team won the game
+the cat sat on the mat
+it is raining again
+the shop closes at six
+my name is john
+the water is cold
+please close the window
+the music was too loud
+i like green tea
+they moved to paris
+the sky is very dark
+she sings beautifully
+the film starts at eight
+he forgot his keys
+the garden looks lovely
+we walked along the beach
+the house was empty
+dogs are loyal animals
+the price went up
+i need a holiday
+the road is closed
