@@ -4,6 +4,9 @@
 # that the plaintext is among the candidates.  Prints the rank of each true plaintext.
 set -uo pipefail
 ulimit -v 10000000    # 10 GB: a runaway case fails instead of exhausting the machine
+# The suite keeps the pre-disk cap of 150 million candidates: it works in $TMPDIR (often a
+# RAM disk) and must stay short; the skip tests below are calibrated to it.
+CAP=(--max-candidates 150000000)
 
 BIN="$(cd "$(dirname "$0")/.." && pwd)/bin/vigenere"
 WORK=$(mktemp -d)
@@ -17,7 +20,7 @@ run_test() {
     local name=$1 plain=$2 key=$3; shift 3
     printf '%s' "$plain" > "$WORK/plain.txt"
     echo "$key" | "$BIN" -e "$WORK/plain.txt" 2>/dev/null > "$WORK/cipher.txt"
-    if ! "$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --top 0 "$@" 2>/dev/null; then
+    if ! "$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --top 0 "${CAP[@]}" "$@" 2>/dev/null; then
         fail "$name: crack failed"; return
     fi
     local line; line=$("$BIN" show "$WORK/run.idx" --rank-of "$plain")
@@ -34,7 +37,7 @@ expect_skip() {
     local name=$1 plain=$2 key=$3
     printf '%s' "$plain" > "$WORK/plain.txt"
     echo "$key" | "$BIN" -e "$WORK/plain.txt" 2>/dev/null > "$WORK/cipher.txt"
-    if ! "$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --top 0 2>/dev/null; then
+    if ! "$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --top 0 "${CAP[@]}" 2>/dev/null; then
         fail "$name: crack failed"; return
     fi
     if "$BIN" show "$WORK/run.idx" --count | grep -q "key length ${#key} skipped: more than"; then
@@ -61,7 +64,7 @@ run_test "kl7  15 letters (algorithmdesign / network)"  algorithmdesign         
 run_test "kl7  16 letters (passwordsecurity / hacking)" passwordsecurity         hacking
 
 # ── Key nearly as long as the text: below about 1.5 x the key length a Vigenere ciphertext
-#    has no unique reading, and these key lengths exceed --max-candidates ─────────────
+#    has no unique reading, and these key lengths exceed the suite's --max-candidates ───
 expect_skip "kl10 13 letters (encryptionkey / technology)"      encryptionkey   technology
 expect_skip "kl11 14 letters (programminglab / mathematics)"    programminglab  mathematics
 expect_skip "kl12 15 letters (cryptographykey / introduction)"  cryptographykey introduction

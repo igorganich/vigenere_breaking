@@ -1,7 +1,9 @@
 #include "dp.hpp"
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <functional>
+#include <mutex>
 #include <thread>
 
 // ── Column DP over key letters ────────────────────────────────────────────────
@@ -45,11 +47,20 @@ void parallel_for(size_t n, int threads, const std::function<void(size_t)>& fn)
     std::atomic<size_t> next{0};
     const size_t chunk = std::max<size_t>(1, n / ((size_t)threads * 64));
     std::vector<std::thread> pool;
+    std::exception_ptr error;      // the first exception of a worker (out of memory, disk full)
+    std::mutex error_mu;
     for (int t = 0; t < threads; t++) pool.emplace_back([&]{
-        for (size_t lo; (lo = next.fetch_add(chunk)) < n; )
-            for (size_t i = lo; i < std::min(n, lo + chunk); i++) fn(i);
+        try {
+            for (size_t lo; (lo = next.fetch_add(chunk)) < n; )
+                for (size_t i = lo; i < std::min(n, lo + chunk); i++) fn(i);
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(error_mu);
+            if (!error) error = std::current_exception();
+            next = n;              // the other workers stop at their next chunk
+        }
     });
     for (auto& th : pool) th.join();
+    if (error) std::rethrow_exception(error);    // in the caller's thread, where it can be caught
 }
 
 namespace {
@@ -156,8 +167,10 @@ std::vector<State<M>> initial_states(const Problem& P)
     return init;
 }
 
+static constexpr size_t SINK_BATCH = 1 << 16;   // keys handed to the sink at a time
+
 template <int M>
-std::vector<uint64_t> column_dp(const Problem& P, int threads, size_t limit, SearchStats* stats)
+size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sink, SearchStats* stats)
 {
     // Forward: the distinct states after each column.  Successors are deduplicated in
     // batches so the raw list never grows far beyond the number of distinct states.
@@ -180,7 +193,7 @@ std::vector<uint64_t> column_dp(const Problem& P, int threads, size_t limit, Sea
                 });
         compact();
         if (stats) stats->peak_states = std::max(stats->peak_states, next.size());
-        if (next.empty()) return {};
+        if (next.empty()) return 0;
         layers.push_back(std::move(next));
     }
 
@@ -205,13 +218,12 @@ std::vector<uint64_t> column_dp(const Problem& P, int threads, size_t limit, Sea
     }
 
     // Keys: walk key prefixes carrying the set of live states each prefix can be in.
-    // Split by the first key letter into 26 tasks, each with its own output.
+    // Split by the first key letter into 26 tasks; each hands its keys to the sink in batches.
     std::vector<long> start;
     for (size_t i = 0; i < layers[0].size(); i++) if (live[0][i]) start.push_back((long)i);
-    if (start.empty()) return {};
+    if (start.empty()) return 0;
     uint64_t pow26[13] = {1};
     for (int i = 1; i <= 12; i++) pow26[i] = pow26[i - 1] * ALPHA;
-    std::vector<std::vector<uint64_t>> part(ALPHA);
     std::atomic<size_t> found{0};
     std::atomic<bool>   over{false};
     std::function<void(int, const std::vector<long>&, uint64_t, std::vector<uint64_t>&, int)> walk =
@@ -219,6 +231,7 @@ std::vector<uint64_t> column_dp(const Problem& P, int threads, size_t limit, Sea
         if (j == L) {
             out.push_back(code);
             if (++found > limit) over = true;
+            else if (out.size() == SINK_BATCH) { sink(out.data(), out.size()); out.clear(); }
             return;
         }
         for (int k = 0; k < ALPHA && !over; k++) {
@@ -235,19 +248,23 @@ std::vector<uint64_t> column_dp(const Problem& P, int threads, size_t limit, Sea
             walk(j + 1, nx, code + (uint64_t)k * pow26[j], out, -1);
         }
     };
-    parallel_for(ALPHA, threads, [&](size_t k){ walk(0, start, 0, part[k], (int)k); });
+    parallel_for(ALPHA, threads, [&](size_t k){
+        std::vector<uint64_t> out;
+        out.reserve(SINK_BATCH);
+        walk(0, start, 0, out, (int)k);
+        if (!over && !out.empty()) sink(out.data(), out.size());
+    });
     if (over) {
         if (stats) stats->over_limit = true;
-        return {};
+        return 0;
     }
-    std::vector<uint64_t> keys;
-    for (auto& v : part) keys.insert(keys.end(), v.begin(), v.end());
-    return keys;
+    return found;
 }
 
 // Short keys split the text into many tracks (2^(T-1) start states) but have a tiny key
 // space, so a brute force over all keys is exact and fast.
-std::vector<uint64_t> brute_force(const std::string& cipher, int kl, const Dictionary& d, int threads)
+size_t brute_force(const std::string& cipher, int kl, const Dictionary& d, int threads, size_t limit,
+                   const KeySink& sink, SearchStats* stats)
 {
     uint64_t total = 1;
     for (int i = 0; i < kl; i++) total *= ALPHA;
@@ -270,27 +287,44 @@ std::vector<uint64_t> brute_force(const std::string& cipher, int kl, const Dicti
     });
     std::vector<uint64_t> keys;
     for (uint64_t c = 0; c < total; c++) if (ok[c]) keys.push_back(c);
-    return keys;
+    if (keys.size() > limit) {
+        if (stats) stats->over_limit = true;
+        return 0;
+    }
+    for (size_t i = 0; i < keys.size(); i += SINK_BATCH)
+        sink(keys.data() + i, std::min(SINK_BATCH, keys.size() - i));
+    return keys.size();
 }
 
 } // namespace
 
-std::vector<uint64_t> find_keys(const std::string& cipher, int key_len, const Dictionary& dict,
-                                int threads, size_t limit, SearchStats* stats)
+size_t find_keys(const std::string& cipher, int key_len, const Dictionary& dict, int threads,
+                 size_t limit, const KeySink& sink, SearchStats* stats)
 {
     const int n = (int)cipher.size();
-    if (key_len <= 4) {   // at most 26^4 keys
-        auto keys = brute_force(cipher, key_len, dict, threads);
-        if (keys.size() <= limit) return keys;
-        if (stats) stats->over_limit = true;
-        return {};
-    }
+    if (key_len <= 4)     // at most 26^4 keys
+        return brute_force(cipher, key_len, dict, threads, limit, sink, stats);
     Problem P{cipher, dict, n, key_len, (n + key_len - 1) / key_len, {}};
     for (int t = 0; t < P.T; t++) P.len.push_back(std::min(key_len, n - t * key_len));
     switch (P.T) {                       // n <= 25 and key_len >= 5: 2..5 tracks
-        case 2:  return column_dp<2>(P, threads, limit, stats);
-        case 3:  return column_dp<3>(P, threads, limit, stats);
-        case 4:  return column_dp<4>(P, threads, limit, stats);
-        default: return column_dp<5>(P, threads, limit, stats);
+        case 2:  return column_dp<2>(P, threads, limit, sink, stats);
+        case 3:  return column_dp<3>(P, threads, limit, sink, stats);
+        case 4:  return column_dp<4>(P, threads, limit, sink, stats);
+        default: return column_dp<5>(P, threads, limit, sink, stats);
     }
+}
+
+std::vector<uint64_t> find_keys(const std::string& cipher, int key_len, const Dictionary& dict,
+                                int threads, size_t limit, SearchStats* stats)
+{
+    std::vector<uint64_t> keys;
+    std::mutex mu;
+    SearchStats st;
+    find_keys(cipher, key_len, dict, threads, limit, [&](const uint64_t* k, size_t n){
+        std::lock_guard<std::mutex> lock(mu);
+        keys.insert(keys.end(), k, k + n);
+    }, &st);
+    if (stats) *stats = st;
+    if (st.over_limit) keys.clear();
+    return keys;
 }

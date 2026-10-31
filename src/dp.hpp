@@ -14,10 +14,20 @@ struct SearchStats {
     bool   over_limit  = false;  // stopped: more than `limit` keys
 };
 
+// Receives found keys in batches.  Called from worker threads, possibly concurrently, so it
+// must be thread-safe; an exception it throws stops the search and is rethrown by find_keys.
+using KeySink = std::function<void(const uint64_t* keys, size_t n)>;
+
 // Every key of length key_len (1 <= key_len < cipher.size() <= 25) whose decryption splits
-// completely into dictionary words, each key exactly once, packed with pack_key.
-// Key lengths <= 4 use a brute force over all 26^key_len keys; longer ones the column DP.
-// Stops and returns {} with stats->over_limit set once more than `limit` keys are found.
+// completely into dictionary words, each key exactly once and in no particular order, packed
+// with pack_key and handed to `sink`.  Key lengths <= 4 use a brute force over all
+// 26^key_len keys; longer ones the column DP.  Returns the number of keys.  Once more than
+// `limit` keys are found it stops, sets stats->over_limit and returns 0; keys already handed
+// to the sink must then be discarded by the caller.
+size_t find_keys(const std::string& cipher, int key_len, const Dictionary& dict, int threads,
+                 size_t limit, const KeySink& sink, SearchStats* stats = nullptr);
+
+// The same, collected into a vector ({} when over the limit).
 std::vector<uint64_t> find_keys(const std::string& cipher, int key_len, const Dictionary& dict,
                                 int threads, size_t limit, SearchStats* stats = nullptr);
 

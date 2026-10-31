@@ -24,10 +24,15 @@ static constexpr size_t INDEX_HEADER_BYTES = 4096;
 struct IndexOptions {
     int    threads        = 0;              // 0 = all hardware threads
     int    max_key_length = 12;
-    // Candidates the index may hold in total.  Building needs about 28 bytes of memory per
-    // candidate, so the default keeps the peak near 4 GB.  A key length that would exceed
-    // it is skipped with a note: with that many readings it carries almost no information.
-    size_t max_candidates = 150'000'000;
+    // Candidates the index may hold in total.  Candidates are kept on disk while building
+    // (about 24 bytes each at the peak, 8 in the finished index), so this bounds disk space
+    // and time, not memory: the default allows about 24 GB of temporary files and an 8 GB
+    // index.  A key length that would exceed it is skipped with a note: with that many
+    // readings it carries almost no information.
+    size_t max_candidates = 1'000'000'000;
+    // Records sorted in memory at a time while ranking (16 bytes each, so about 1 GB);
+    // more are sorted on disk.
+    size_t sort_chunk = 64u << 20;
 };
 
 struct IndexSummary {
@@ -42,9 +47,10 @@ IndexSummary build_index(const std::string& cipher, const Dictionary& dict, cons
                          const IndexOptions& opt, const std::string& path);
 
 // Rank the candidates of an existing index by `model` and write them to a new index (`out`
-// may equal `in`).  No search is repeated.  Throws std::runtime_error on failure.
+// may equal `in`).  No search is repeated; sort_chunk as in IndexOptions.  Throws
+// std::runtime_error on failure.
 IndexSummary rerank_index(const std::string& in, const std::string& out, const Dictionary& dict,
-                          const LanguageModel& model, int threads);
+                          const LanguageModel& model, int threads, size_t sort_chunk = 64u << 20);
 
 // Name of the model an index is ranked by ("zipf" for indexes without a model line, which
 // can only be re-ranked).

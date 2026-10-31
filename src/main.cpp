@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <string>
 #include <unistd.h>
 #include "cipher.hpp"
@@ -54,7 +55,8 @@ static void usage(const char* prog)
         "        --top N             print the best N afterwards (default 10)\n"
         "        --max-key-length N  try key lengths 1..N (default 12)\n"
         "        --max-candidates N  skip key lengths that would exceed N candidates in total\n"
-        "                            (default 150000000, about 4 GB of memory)\n"
+        "                            (default 1000000000; candidates are kept on disk: about\n"
+        "                            24 bytes each while building, 8 in the index)\n"
         "        --model M           ranking model: unigram, bigram or trigram (default trigram)\n"
         "        --threads N         worker threads (default: all)\n"
         "  " << prog << " rerank <index_file> <new_index_file> [--model M] [--threads N] [--top N]\n"
@@ -131,7 +133,10 @@ static int cmd_crack(int argc, char** argv)
     Dictionary dict = load();
     LanguageModel model = load_lm(dict, kind);
     try {
-        build_index(cipher, dict, model, opt, argv[3]);
+        try { build_index(cipher, dict, model, opt, argv[3]); }
+        catch (const std::bad_alloc&) {
+            throw std::runtime_error("out of memory in the search; try a smaller --max-key-length");
+        }
         IndexReader idx(argv[3], dict, model);
         for (const auto& note : idx.summary().notes) std::fprintf(stderr, "note: %s\n", note.c_str());
         for (const auto& c : idx.range(1, top)) print(c);

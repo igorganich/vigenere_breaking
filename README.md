@@ -73,7 +73,7 @@ This is a dynamic program over key columns (`src/dp.cpp`):
 Two cases carry no usable information, and `crack` skips the key length with a note rather than enumerating English:
 
 - **The ciphertext repeats with period `L`.** Then the plaintext must repeat too, and any repeating English text is an equally good answer.
-- **More candidates than `--max-candidates`** (default 150 million). This happens when the key is nearly as long as the text: for key length 9 on 10 letters, only one plaintext letter is tied to another, so almost any word sequence fits.
+- **More candidates than `--max-candidates`** (default 1 billion). This happens when the key is nearly as long as the text: for key length 9 on 10 letters, only one plaintext letter is tied to another, so almost any word sequence fits.
 
 ---
 
@@ -131,7 +131,8 @@ bin/vigenere crack cipher.txt run.idx [options]
 --top N             print the best N afterwards (default 10)
 --max-key-length N  try key lengths 1..N (default 12)
 --max-candidates N  skip key lengths that would exceed N candidates in total
-                    (default 150000000, about 4 GB of memory while building)
+                    (default 1000000000; candidates are kept on disk next to the
+                    index: about 24 bytes each while building, 8 in the index)
 --model M           ranking model: unigram, bigram or trigram (default trigram; see section 3)
 --threads N         worker threads (default: all)
 ```
@@ -195,14 +196,19 @@ Measured on a 20-thread machine.
 
 For the 25-letter stress case, key lengths 1–10 take a few seconds and key lengths 11 and 12 take the rest; the index is 445 MB. The search it replaced (a word-by-word constraint search) was extrapolated to take about two months for the same case.
 
-Building needs about 28 bytes of memory per candidate, plus the DP columns (up to about 1 GB for 25 letters with key length 12).
+Candidates never sit in memory: the search writes them to a temporary file next to the index, and ranking sorts them on disk in chunks of 64 million (about 1 GB), then merges the sorted runs. Memory is about 2.3 GB at most, whatever the number of candidates (the DP columns plus one chunk); disk is about 24 bytes per candidate while building and 8 in the finished index. Two texts that needed more memory than a 15 GB machine has before:
+
+| Ciphertext | Key | Candidates | True plaintext | Time | Memory | Index |
+|---|---|---|---|---|---|---|
+| "check the second drawer" (20 letters) | `fczrzibvcca` | 280,914,433 (key length 12 skipped) | rank 1 | 7 min 8 s | 2.3 GB | 2.2 GB |
+| "my brother lives in london" (22 letters) | `increasingly` | 631,850,161 | rank 1 | 8 min 53 s | 2.3 GB | 5.1 GB |
 
 ---
 
 ## 7. Limitations
 
 - **Dictionary coverage.** Every word of the plaintext must be in `txt/english_words.txt`. The list covers more than one might expect ("dont", "london", "email") but misses, for example, "usa", "covid", "smartphone", "wifi" and American "color".
-- **Ambiguity.** When the text is short relative to the key, enormous numbers of word sequences fit, and no search can tell them apart: 25 letters with key length 12 give 48 million candidates; key length 9 on 10 letters gives hundreds of millions (skipped). Below about 1.5 × the key length (e.g. 13 letters with key length 10) a ciphertext has no unique reading, and such key lengths usually exceed `--max-candidates`. Only the ranking can choose.
+- **Ambiguity.** When the text is short relative to the key, enormous numbers of word sequences fit, and no search can tell them apart: 25 letters with key length 12 give 48 million candidates; key length 9 on 10 letters gives hundreds of millions (skipped). Below about 1.5 × the key length (e.g. 13 letters with key length 10) a ciphertext has no unique reading, and such key lengths can exceed even the default `--max-candidates` of a billion; the limit bounds disk space and time, so it can be raised. Only the ranking can choose.
 - **Ranking.** Single-word models favour common words, so word salad like "may employ ushered triple tow" can outrank a real sentence: on the stress case the true plaintext is at rank 6,376 with `unigram`, 512 with `bigram` and 9 with `trigram` (4,980 with the removed `zipf`). What still ranks above it there is mostly the key prior: its 12-letter key costs about 10 nats more than the 9-letter key of the reading ranked first ([TODO.md](TODO.md)).
 - **Skipped key lengths** (repeating ciphertext, too many candidates) are listed with `show --count`.
 
@@ -219,8 +225,8 @@ python3 bench/bench.py  # randomized grid → bench/results.csv
 python3 bench/realistic.py  # real short phrases → bench/realistic-{bigram,trigram}.csv
 ```
 
-- **Unit tests** (`tests/test_dp.cpp`): the search against an independent brute force for key lengths 1–5 on texts of 8, 12, 19 and 22 letters (2–5 rows, words crossing rows), and the index file: round trip, score order, one entry per plaintext, `rank_of`, skipped key lengths, rejection of non-index files; the language models (probabilities sum to 1, the split DPs against a brute force over all splits, the reported split has the reported score, word order matters only to `bigram`, a known triple beats its bigram estimate); `rerank` (same candidates in the new order, the model recorded and checked, re-ranking back in place restores the original file byte for byte, an index from before the models is rejected by the reader but re-ranked correctly).
-- **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–8 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts. Texts over 16 letters stop at key length 10 to keep the suite shorter; the stress script covers the full range. The suite caps its own memory at 10 GB.
+- **Unit tests** (`tests/test_dp.cpp`): the search against an independent brute force for key lengths 1–5 on texts of 8, 12, 19 and 22 letters (2–5 rows, words crossing rows), and the index file: round trip, score order, one entry per plaintext, `rank_of`, skipped key lengths, rejection of non-index files; the language models (probabilities sum to 1, the split DPs against a brute force over all splits, the reported split has the reported score, word order matters only to `bigram`, a known triple beats its bigram estimate); `rerank` (same candidates in the new order, the model recorded and checked, re-ranking back in place restores the original file byte for byte, an index from before the models is rejected by the reader but re-ranked correctly); building and re-ranking on disk (tiny sort chunks force sorted runs and a merge, and must give the same file byte for byte as sorting in memory), a key length over the limit leaving nothing behind, and no temporary files left over.
+- **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes, with `--max-candidates 150000000` to stay short): 18 known plaintexts with key lengths 1–8 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts. Texts over 16 letters stop at key length 10 to keep the suite shorter; the stress script covers the full range. The suite caps its own memory at 10 GB.
 - **Benchmark** (`bench/bench.py`): plaintexts from common words (8–24 letters) with random keys (2–12 letters); records the rank of the true plaintext, the candidate count and the time. These plaintexts are word salad drawn from single-word frequencies, so this benchmark measures the search, not the ranking.
 - **Realistic benchmark** (`bench/realistic.py`): 105 real short phrases (`bench/phrases.txt`: messages, instructions, sayings, plain sentences; 9–23 letters), each with one key, alternately a common English word or random letters, of length 2 to 0.6 × the text length. Reports found / top-1 / top-10 / top-100 / top-1000, mean reciprocal rank and median rank, overall, by key type and by text length, and lists every plaintext ranked below 10 next to the reading ranked first. Indexes are kept in `bench/cache/`; each is re-ranked by every model in `--models` (default `bigram,trigram`), with results in `bench/realistic-MODEL.csv` and a side-by-side list of the cases where the models disagree, so models are compared on the same candidates without repeating the search.
 

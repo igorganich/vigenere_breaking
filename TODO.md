@@ -32,8 +32,8 @@ is meant for a few hundred words, not a 300,000-word list.
 - The forward pass of the column DP is single-threaded (about 1 min of the 3.5 min for the
   stress case); each column can be split across threads.
 - States are 8 bytes per track plus padding; a compact encoding (17-bit trie nodes)
-  would cut memory per column by about half and allow longer columns before
-  `--max-candidates` matters.
+  would cut the memory of the DP columns, now the only part of the build that grows in
+  memory (candidates are on disk).
 
 ## Out of scope (recorded so they are not revisited)
 
@@ -43,4 +43,4 @@ is meant for a few hundred words, not a 300,000-word list.
 - **Key lengths with more candidates than `--max-candidates`.** With a key nearly as long as
   the text (e.g. key length 9 on 10 letters), almost any word sequence fits; listing them
   is enumerating English. `crack` skips such key lengths with a note.
-- **Disk space** for very large indexes (8 bytes per candidate).
+- **Disk space** for very large indexes (8 bytes per candidate, 24 while building).

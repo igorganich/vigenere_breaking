@@ -261,6 +261,62 @@ int main()
         unlink(other.c_str());
     }
     {
+        // Ranking on disk: tiny sort chunks force sorted runs and a merge; the index must be
+        // the same file as when everything is sorted in memory, for crack and for rerank.
+        auto read_all = [](const std::string& p) {
+            FILE* f = std::fopen(p.c_str(), "rb");
+            std::string s;
+            char buf[1 << 16];
+            size_t got;
+            while ((got = std::fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, got);
+            std::fclose(f);
+            return s;
+        };
+        const std::string cipher = encrypt("helloworld", "code"), other = path + ".disk";
+        IndexOptions opt;
+        opt.max_key_length = 6;
+        const size_t count = build_index(cipher, dict, trigram, opt, path).count;
+        const std::string in_memory = read_all(path);
+        for (size_t chunk : {(size_t)1000, count / 3, count / 2 + 1, count / 4}) {
+            opt.sort_chunk = chunk;
+            build_index(cipher, dict, trigram, opt, other);
+            check(read_all(other) == in_memory,
+                  "disk sort: crack with chunks of " + std::to_string(chunk) + " of " + std::to_string(count) +
+                  " gives the same index");
+        }
+        rerank_index(path, other, dict, bigram, threads);
+        const std::string bigram_memory = read_all(other);
+        rerank_index(path, other, dict, bigram, threads, 777);
+        check(read_all(other) == bigram_memory, "disk sort: rerank with chunks of 777 gives the same index");
+        rerank_index(other, other, dict, trigram, threads, 1000);
+        check(read_all(other) == in_memory, "disk sort: rerank in place with chunks of 1000");
+
+        // A key length over the limit leaves nothing behind in the candidate file.
+        IndexOptions lim;
+        lim.max_key_length = 6;
+        IndexSummary full = build_index(cipher, dict, trigram, lim, other);
+        size_t below = 0;
+        int last = 0;
+        for (auto [kl, c] : full.per_key_length) if (c) last = kl;
+        for (auto [kl, c] : full.per_key_length) if (kl < last) below += c;
+        lim.max_candidates = full.count - 1;
+        lim.sort_chunk = 1000;
+        IndexSummary cut = build_index(cipher, dict, trigram, lim, other);
+        IndexReader ci(other, dict, trigram);
+        bool only_below = cut.count == below;
+        for (const auto& c : ci.range(1, ci.summary().count)) only_below = only_below && (int)c.key.size() < last;
+        check(only_below && ci.summary().count == below,
+              "limit: key length " + std::to_string(last) + " skipped, its partial output dropped (" +
+              std::to_string(below) + " candidates left)");
+
+        // No temporary files are left next to the index.
+        bool clean = true;
+        for (const char* suffix : {".tmp", ".keys.tmp", ".run0.tmp", ".run1.tmp"})
+            clean = clean && access((other + suffix).c_str(), F_OK) != 0;
+        check(clean, "disk sort: temporary files removed");
+        unlink(other.c_str());
+    }
+    {
         // A ciphertext that repeats with period 3: key length 3 carries no information.
         IndexOptions opt;
         opt.max_key_length = 4;
