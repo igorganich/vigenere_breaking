@@ -55,7 +55,7 @@ Classic attacks (index of coincidence, frequency analysis, n-gram hill-climbing)
 
 - Ciphertext of **2–25 letters** (non-letters are stripped; longer input is rejected).
 - Key length **1–12**.
-- The plaintext consists **entirely of dictionary words**: the bundled word list of 44,275 words plus "a" and "i", written without spaces or punctuation ("dont", not "don't"). A plaintext containing a word outside the list is not found (see [§8](#8-limitations)).
+- The plaintext consists **entirely of dictionary words**: the bundled word list of 44,273 words plus "a" and "i", written without spaces or punctuation ("dont", not "don't"). A plaintext containing a word outside the list is not found (see [§8](#8-limitations)).
 
 ---
 
@@ -341,7 +341,7 @@ python3 bench/realistic.py   # real short phrases → bench/realistic-{trigram,g
 
 ## 10. Data Sources
 
-- **Word list:** [corncob_lowercase.txt](http://www.mieliestronk.com/corncob_lowercase.txt), in frequency order.
+- **Word list** (`txt/english_words.txt`): 44,273 words of the corncob list (`corncob_lowercase.txt`, 58,109 words, by mieliestronk.com; the original link is gone, an [archived copy](https://web.archive.org/web/20191214032117/http://www.mieliestronk.com/corncob_lowercase.txt) remains), in order of frequency. Every word in the file is in corncob; how the subset and its order were chosen was not recorded.
 - **Word and word-pair counts:** [count_1w.txt and count_2w.txt](https://norvig.com/ngrams/) by Peter Norvig, from the Google Web Trillion Word Corpus, reduced to the word list by `tools/make_ngram_tables.py`:
   ```bash
   python3 tools/make_ngram_tables.py DIR_WITH_count_1w.txt_AND_count_2w.txt
