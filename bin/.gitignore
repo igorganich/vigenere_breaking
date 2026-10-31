@@ -1,1 +1,3 @@
-/vigenere-unigram
+# Build outputs: compile with `make`.
+*
+!.gitignore

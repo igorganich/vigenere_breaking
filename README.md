@@ -158,7 +158,7 @@ make test     # unit tests + end-to-end tests
 make clean
 ```
 
-The binary finds the word list and model tables in `txt/` next to its own `bin/` directory, whatever the working directory.
+The repository holds no binary: build it on the machine that runs it. The build uses `-march=native`, so the binary is tuned to that CPU and may not run on another one; rebuild there instead of copying it. The binary finds the word list and model tables in `txt/` next to its own `bin/` directory, whatever the working directory.
 
 ### 4.3 Encrypting
 
