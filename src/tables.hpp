@@ -54,13 +54,11 @@ struct Dictionary {
     std::unordered_map<std::string,int> rank;      // word -> 1-based frequency rank
     Trie                                trie;      // all words
     Trie                                suffixes;  // all proper word suffixes (word[i:], i >= 1)
-    std::vector<double>                 node_logp; // trie node -> word log-probability (word ends)
     std::vector<int>                    node_rank; // trie node -> word rank (word ends)
     uint64_t                            fingerprint = 1469598103934665603ull;  // FNV-1a of the file
 };
 
-// Word probabilities follow Zipf's law over the frequency-ordered list:
-// P(rank r) = (1/r) / Σ 1/r'.
+// Ranks are only shown next to words; probabilities come from the language model (model.hpp).
 inline Dictionary load_dictionary(const std::string& path)
 {
     std::ifstream f(path);
@@ -81,15 +79,10 @@ inline Dictionary load_dictionary(const std::string& path)
         d.trie.insert(x);
         for (size_t i = 1; i < x.size(); i++) d.suffixes.insert(x.substr(i));
     }
-    double h = 0;
-    for (int k = 1; k <= (int)d.rank.size(); k++) h += 1.0 / k;
-    const double logz = std::log(h);
-    d.node_logp.assign(d.trie.ch.size(), 0);
     d.node_rank.assign(d.trie.ch.size(), 0);
     for (const auto& [word, rk] : d.rank) {
         int u = d.trie.find(word);
         d.node_rank[u] = rk;
-        d.node_logp[u] = -std::log((double)rk) - logz;
     }
     return d;
 }

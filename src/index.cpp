@@ -36,7 +36,7 @@ int expanded_period(const std::string& key, int n)
 }
 
 struct Header {
-    std::string  cipher, dict, model = "zipf", model_fp = "-";
+    std::string  cipher, dict, model = "zipf", model_fp;
     int          max_key_length = 12;
     IndexSummary sum;
 };
@@ -214,6 +214,8 @@ IndexReader::IndexReader(const std::string& path, const Dictionary& dict, const 
     std::string why;
     if (h.dict != hex(dict.fingerprint))
         why = path + " was built with a different dictionary";
+    else if (h.model == "zipf")
+        why = path + " is ranked by the removed zipf model; update it with `rerank`";
     else if (h.model != model.name)
         why = path + " is ranked by the " + h.model + " model, not " + model.name;
     else if (h.model_fp != model.fingerprint)

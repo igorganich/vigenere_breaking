@@ -55,27 +55,30 @@ static std::set<uint64_t> brute_force(const Dictionary& d, const std::string& ci
     return keys;
 }
 
+// log P(word v | previous words p2 p1) under model m, word by word (-1 = no word).
+static double word_logp(const LanguageModel& m, int p2, int p1, int v)
+{
+    if (m.kind == ModelKind::Trigram && p2 >= 0 && p1 >= 0) return m.tri(p2, p1, v);
+    if ((m.kind == ModelKind::Bigram || m.kind == ModelKind::Trigram) && p1 >= 0) return m.bi(p1, v);
+    return m.uni[v];
+}
+
 // Reference: the best score of `text` under model m by trying every split into dictionary
 // words and stray letters, scoring each split word by word.  Independent of the DPs.
 static double best_split(const Dictionary& d, const LanguageModel& m, const std::string& text)
 {
     double best = -1e300;
-    std::function<void(size_t, int, double)> go = [&](size_t pos, int prev, double acc) {
+    std::function<void(size_t, int, int, double)> go = [&](size_t pos, int p2, int p1, double acc) {
         if (pos == text.size()) { best = std::max(best, acc); return; }
-        go(pos + 1, -1, acc + m.stray_logp);
+        go(pos + 1, -1, -1, acc + m.stray_logp);
         for (size_t e = pos + 1; e <= text.size(); e++) {
             const std::string w = text.substr(pos, e - pos);
             if (!d.words.count(w)) continue;
             const int v = d.trie.find(w);
-            double lp = m.uni[v];
-            if (m.kind == ModelKind::Bigram && prev >= 0) {
-                const double* p = m.pairs.get(PairTable::key(prev, v));
-                lp = p ? *p : m.backoff[prev] + m.uni[v];
-            }
-            go(e, m.kind == ModelKind::Bigram ? v : -1, acc + lp);
+            go(e, p1, v, acc + word_logp(m, p2, p1, v));
         }
     };
-    go(0, -1, 0);
+    go(0, -1, -1, 0);
     return best;
 }
 
@@ -84,21 +87,17 @@ static double score_of_split(const Dictionary& d, const LanguageModel& m, const 
                              std::string* text)
 {
     double acc = 0;
-    int prev = -1;
+    int p2 = -1, p1 = -1;
     text->clear();
     for (size_t i = 0; i < fmt.size(); ) {
-        if (fmt[i] != '[') { *text += fmt[i++]; acc += m.stray_logp; prev = -1; continue; }
+        if (fmt[i] != '[') { *text += fmt[i++]; acc += m.stray_logp; p2 = p1 = -1; continue; }
         size_t colon = fmt.find(':', i), close = fmt.find(']', i);
         const std::string w = fmt.substr(i + 1, colon - i - 1);
         *text += w;
         const int v = d.trie.find(w);
-        double lp = m.uni[v];
-        if (m.kind == ModelKind::Bigram && prev >= 0) {
-            const double* p = m.pairs.get(PairTable::key(prev, v));
-            lp = p ? *p : m.backoff[prev] + m.uni[v];
-        }
-        acc += lp;
-        prev = m.kind == ModelKind::Bigram ? v : -1;
+        acc += word_logp(m, p2, p1, v);
+        p2 = p1;
+        p1 = v;
         i = close + 1;
     }
     return acc;
@@ -107,7 +106,9 @@ static double score_of_split(const Dictionary& d, const LanguageModel& m, const 
 int main()
 {
     Dictionary dict = load_dictionary("txt/english_words.txt");
-    const LanguageModel zipf = load_model(ModelKind::Zipf, dict, "txt");
+    const LanguageModel unigram = load_model(ModelKind::Unigram, dict, "txt");
+    const LanguageModel bigram  = load_model(ModelKind::Bigram, dict, "txt");
+    const LanguageModel trigram = load_model(ModelKind::Trigram, dict, "txt");
     const int threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
 
     // ── find_keys equals brute force ─────────────────────────────────────────
@@ -134,8 +135,6 @@ int main()
     }
 
     // ── language models ──────────────────────────────────────────────────────
-    const LanguageModel unigram = load_model(ModelKind::Unigram, dict, "txt");
-    const LanguageModel bigram  = load_model(ModelKind::Bigram, dict, "txt");
     {
         // P(w) and P(w | w1) each sum to 1 over the dictionary.
         double total = 0;
@@ -151,10 +150,18 @@ int main()
             }
             check(std::fabs(sum - 1) < 1e-9, std::string("bigram: P(w | ") + w1 + ") sums to 1");
         }
+        for (auto [w1, w2] : {std::pair<const char*, const char*>{"i", "am"}, {"going", "to"},
+                              {"of", "the"}, {"see", "it"}, {"zebra", "crossing"}}) {
+            const int u = dict.trie.find(w1), v = dict.trie.find(w2);
+            double sum = 0;
+            for (const auto& w : dict.words) sum += std::exp(trigram.tri(u, v, dict.trie.find(w)));
+            check(std::fabs(sum - 1) < 1e-9, std::string("trigram: P(w | ") + w1 + " " + w2 + ") sums to 1");
+        }
         // The DPs find the best split, and the split they report has that score.
         const std::vector<std::string> texts = {"imissyousomuch", "meetmeatnoon", "ofareaswithout",
-                                                "theqcatxsat", "helloworld", "xq", "a"};
-        for (const LanguageModel* m : {&zipf, &unigram, &bigram})
+                                                "theqcatxsat", "helloworld", "xq", "a",
+                                                "iamtoldtogoandseeitbyfour", "iwillbetheresoon"};
+        for (const LanguageModel* m : {&unigram, &bigram, &trigram})
             for (const auto& t : texts) {
                 std::string fmt, back;
                 const double got = segment(dict, *m, t, &fmt);
@@ -167,9 +174,9 @@ int main()
         const double ok = segment(dict, bigram, "iwillbetheresoon"), bad = segment(dict, bigram, "therebesoonwilli");
         const double uok = segment(dict, unigram, "iwillbetheresoon"), ubad = segment(dict, unigram, "therebesoonwilli");
         check(ok > bad + 5 && std::fabs(uok - ubad) < 1e-9, "bigram: word order matters, unigram: it does not");
-        // The zipf model is the original scorer: rank-based log-probabilities, stray -15.
-        check(zipf.uni == dict.node_logp && zipf.stray_logp == -15 && zipf.fingerprint == "-",
-              "zipf: the original rank-based model");
+        // Three-word context: a trigram the corpus knows beats the bigram estimate for it.
+        const int i = dict.trie.find("i"), am = dict.trie.find("am"), going = dict.trie.find("going");
+        check(trigram.tri(i, am, going) > trigram.bi(am, going), "trigram: P(going | i am) > P(going | am)");
     }
 
     // ── index: round trip, order, rank_of ────────────────────────────────────
@@ -181,12 +188,12 @@ int main()
         const std::string plain = "helloworld", cipher = encrypt(plain, "code");
         IndexOptions opt;
         opt.max_key_length = 6;
-        auto sum = build_index(cipher, dict, zipf, opt, path);
+        auto sum = build_index(cipher, dict, trigram, opt, path);
         size_t per_kl = 0;
         for (auto [kl, n] : sum.per_key_length) per_kl += n;
         check(sum.count > 0 && per_kl == sum.count, "index: per-key-length counts add up");
 
-        IndexReader idx(path, dict, zipf);
+        IndexReader idx(path, dict, trigram);
         check(idx.cipher() == cipher && idx.summary().count == sum.count, "index: header read back");
         auto all = idx.range(1, idx.summary().count);
         bool sorted = all.size() == sum.count;
@@ -204,7 +211,7 @@ int main()
         check(idx.range(sum.count + 1, sum.count + 5).empty(), "index: range past the end is empty");
     }
     {
-        // rerank: same candidates in bigram order; back to zipf restores the file exactly.
+        // rerank: same candidates in bigram order; back to trigram restores the file exactly.
         auto read_all = [](const std::string& p) {
             FILE* f = std::fopen(p.c_str(), "rb");
             std::string s;
@@ -214,39 +221,50 @@ int main()
             std::fclose(f);
             return s;
         };
-        const std::string original = read_all(path), other = path + ".bigram";
+        auto write_all = [](const std::string& p, const std::string& s) {
+            FILE* f = std::fopen(p.c_str(), "wb");
+            std::fwrite(s.data(), 1, s.size(), f);
+            std::fclose(f);
+        };
+        const std::string original = read_all(path), other = path + ".other";
         rerank_index(path, other, dict, bigram, threads);
-        check(index_model_name(other) == "bigram" && index_model_name(path) == "zipf",
+        check(index_model_name(other) == "bigram" && index_model_name(path) == "trigram",
               "rerank: model recorded in the header");
-        IndexReader zi(path, dict, zipf), bi(other, dict, bigram);
-        auto za = zi.range(1, zi.summary().count), ba = bi.range(1, bi.summary().count);
-        std::set<std::string> zk, bk;
+        IndexReader ti(path, dict, trigram), bi(other, dict, bigram);
+        auto ta = ti.range(1, ti.summary().count), ba = bi.range(1, bi.summary().count);
+        std::set<std::string> tk, bk;
         bool sorted = true;
-        for (const auto& c : za) zk.insert(c.key);
+        for (const auto& c : ta) tk.insert(c.key);
         for (size_t i = 0; i < ba.size(); i++) {
             bk.insert(ba[i].key);
             sorted = sorted && (i == 0 || ba[i - 1].score >= ba[i].score);
         }
-        check(zk == bk && sorted && bi.summary().count == zi.summary().count,
+        check(tk == bk && sorted && bi.summary().count == ti.summary().count,
               "rerank: same candidates, descending bigram score");
-        check(bi.rank_of("helloworld") > 0 && bi.rank_of("helloworld") <= zi.rank_of("helloworld"),
-              "rerank: helloworld ranks at least as high by bigram (" + std::to_string(bi.rank_of("helloworld")) +
-              " vs " + std::to_string(zi.rank_of("helloworld")) + ")");
         bool threw = false;
-        try { IndexReader wrong(other, dict, zipf); } catch (const std::exception&) { threw = true; }
+        try { IndexReader wrong(other, dict, trigram); } catch (const std::exception&) { threw = true; }
         check(threw, "rerank: reading with another model is rejected");
-        rerank_index(other, other, dict, zipf, threads);     // in place
-        const std::string back = read_all(other);
-        check(back.size() == original.size() &&
-              back.compare(INDEX_HEADER_BYTES, std::string::npos, original, INDEX_HEADER_BYTES, std::string::npos) == 0,
-              "rerank: back to zipf in place gives the original order");
+        rerank_index(other, other, dict, trigram, threads);     // in place
+        check(read_all(other) == original, "rerank: back to trigram in place gives the original file");
+
+        // An index from before the models (no model line, ranked by the removed zipf model)
+        // cannot be read, but can be re-ranked.
+        std::string old = original;
+        const size_t at = old.find("model trigram"), end = old.find('\n', at);
+        old.replace(at, end - at, std::string(end - at, '\n'));
+        write_all(other, old);
+        threw = false;
+        try { IndexReader legacy(other, dict, trigram); } catch (const std::exception&) { threw = true; }
+        check(threw && index_model_name(other) == "zipf", "legacy index: rejected by the reader");
+        rerank_index(other, other, dict, trigram, threads);
+        check(read_all(other) == original, "legacy index: rerank gives the trigram index");
         unlink(other.c_str());
     }
     {
         // A ciphertext that repeats with period 3: key length 3 carries no information.
         IndexOptions opt;
         opt.max_key_length = 4;
-        auto sum = build_index("abcabcabcab", dict, zipf, opt, path);
+        auto sum = build_index("abcabcabcab", dict, trigram, opt, path);
         bool skipped = std::any_of(sum.notes.begin(), sum.notes.end(),
                                    [](const std::string& s){ return s.find("key length 3 skipped") == 0; });
         bool listed = std::any_of(sum.per_key_length.begin(), sum.per_key_length.end(),
@@ -255,7 +273,7 @@ int main()
     }
     {
         bool threw = false;
-        try { IndexReader bad("txt/english_words.txt", dict, zipf); } catch (const std::exception&) { threw = true; }
+        try { IndexReader bad("txt/english_words.txt", dict, trigram); } catch (const std::exception&) { threw = true; }
         check(threw, "index: a non-index file is rejected");
     }
     unlink(path.c_str());

@@ -1,16 +1,21 @@
 # TODO
 
-## Ranking: a word-pair model
+## Ranking
 
-The search is exhaustive, so finding the plaintext is no longer the problem; ranking it is.
-Scores use unigram word frequencies estimated from rank, so word salad of common words
-outranks real sentences. On the stress case (`bench/stress.sh`, 25 letters, key length 12)
-the true plaintext is at rank 4,980 of 55.6 million, behind readings like "may employ
-ushered triple tow".
+`trigram` is the default; `bigram` and `unigram` remain for comparison, and `rerank` switches
+an existing index. The earlier `zipf` model was dropped after the realistic benchmark. On the
+stress case (`bench/stress.sh`, 25 letters, key length 12) the true plaintext is at rank 9
+(bigram 512, zipf 4,980). Open: finish the bigram/trigram comparison on all 105 phrases of
+`bench/realistic.py`.
 
-A word-bigram model (log P(w₂ | w₁) from a corpus) would rank grammatical sequences far
-higher. It needs a bigram table with counts; the current word list has ranks only. Scoring
-stays a DP over the word split, with the previous word as extra state.
+Further ideas, in the order they look most useful:
+- **Sentence start.** Most messages start a sentence; P(w₁ | start) and P(w₂ | start w₁)
+  from the subtitle corpus would favour "i am ..." over "a jury ...".
+- **Key prior.** −key_length · ln 26 assumes random keys. Keys that are English words
+  (`map`, `whilst`) could get a mixture prior, P(key) = ½ · 26^−L + ½ · P_word(key).
+- **Larger trigram table.** 978k triples (count ≥ 15, 18 MB) from 179M words; more corpus
+  and a lower cutoff raise coverage of real phrases (the table holds 149 of the 211 word
+  triples in `bench/phrases.txt`) at the cost of a bigger file.
 
 ## Custom words: `--dict FILE`
 

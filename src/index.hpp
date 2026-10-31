@@ -17,7 +17,7 @@
 // Header lines:  VIGIDX 1 / cipher <text> / dict <fingerprint> <words> /
 //                model <name> <fingerprint> / max_key_length <n> / count <n> /
 //                kl <len> <count> ... / note <text> ... / end
-// An index without a model line (written before models existed) is ranked by zipf.
+// An index without a model line was ranked by the removed zipf model; `rerank` updates it.
 
 static constexpr size_t INDEX_HEADER_BYTES = 4096;
 
@@ -46,7 +46,8 @@ IndexSummary build_index(const std::string& cipher, const Dictionary& dict, cons
 IndexSummary rerank_index(const std::string& in, const std::string& out, const Dictionary& dict,
                           const LanguageModel& model, int threads);
 
-// Name of the model an index is ranked by ("zipf" for indexes without a model line).
+// Name of the model an index is ranked by ("zipf" for indexes without a model line, which
+// can only be re-ranked).
 std::string index_model_name(const std::string& path);
 
 struct Candidate {

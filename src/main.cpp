@@ -55,10 +55,10 @@ static void usage(const char* prog)
         "        --max-key-length N  try key lengths 1..N (default 12)\n"
         "        --max-candidates N  skip key lengths that would exceed N candidates in total\n"
         "                            (default 150000000, about 4 GB of memory)\n"
-        "        --model M           ranking model: zipf, unigram or bigram (default zipf)\n"
+        "        --model M           ranking model: unigram, bigram or trigram (default trigram)\n"
         "        --threads N         worker threads (default: all)\n"
         "  " << prog << " rerank <index_file> <new_index_file> [--model M] [--threads N] [--top N]\n"
-        "      rank the candidates of an index by another model (default bigram), without\n"
+        "      rank the candidates of an index by another model (default trigram), without\n"
         "      repeating the search; the two files may be the same\n"
         "  " << prog << " show <index_file> (--count | --first N | --nth N | --range A B | --rank-of PLAINTEXT)\n"
         "      read candidates from an index by rank (rank 1 = most probable), scored by the\n"
@@ -110,7 +110,7 @@ static int cmd_crack(int argc, char** argv)
     if (argc < 4) usage(argv[0]);
     IndexOptions opt;
     size_t top = 10;
-    ModelKind kind = ModelKind::Zipf;
+    ModelKind kind = ModelKind::Trigram;
     for (int i = 4; i < argc; i++) {
         std::string a = argv[i];
         if      (a == "--threads"        && i + 1 < argc) opt.threads        = std::stoi(argv[++i]);
@@ -145,7 +145,7 @@ static int cmd_crack(int argc, char** argv)
 static int cmd_rerank(int argc, char** argv)
 {
     if (argc < 4) usage(argv[0]);
-    ModelKind kind = ModelKind::Bigram;
+    ModelKind kind = ModelKind::Trigram;
     int threads = 0;
     size_t top = 10;
     for (int i = 4; i < argc; i++) {
@@ -175,6 +175,8 @@ static int cmd_show(int argc, char** argv)
     try {
         ModelKind kind;
         const std::string name = index_model_name(argv[2]);
+        if (name == "zipf")
+            throw std::runtime_error(std::string(argv[2]) + " is ranked by the removed zipf model; update it with `rerank`");
         if (!parse_model_kind(name, &kind)) throw std::runtime_error(std::string(argv[2]) + ": unknown model " + name);
         LanguageModel model = load_lm(dict, kind);
         IndexReader idx(argv[2], dict, model);

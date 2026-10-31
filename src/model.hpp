@@ -1,5 +1,6 @@
 #pragma once
 #include "tables.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -11,7 +12,6 @@
 
 // ── Language models for ranking ───────────────────────────────────────────────
 //
-//   zipf     P(w) from the word's frequency rank (Zipf's law); the original model.
 //   unigram  P(w) = c(w) / Σ c over the dictionary, from txt/english_unigrams.txt.
 //   bigram   P(w₂ | w₁) from txt/english_bigrams.txt, backing off to the unigram model:
 //              c(w₁ w₂) / c(w₁)       for pairs in the table,
@@ -19,17 +19,29 @@
 //            where α(w₁) spreads the probability the listed pairs leave over the words
 //            not listed after w₁, so P(· | w₁) sums to 1.  The table only holds pairs
 //            seen at least 100,000 times, so every unlisted pair is rarer than that; no
-//            parameter is tuned.  The first word of the text, and a word after a stray
-//            letter, use P(w).
+//            parameter is tuned.
+//   trigram  P(w₃ | w₁ w₂) from txt/english_trigrams.txt, backing off to the bigram model:
+//              (c(w₁ w₂ w₃) − D) / c(w₁ w₂)   for trigrams in the table,
+//              α(w₁ w₂) · P(w₃ | w₂)           for the rest,
+//            with c(w₁ w₂) from txt/english_trigram_contexts.txt (every continuation,
+//            including trigrams below the table's cutoff) and α(w₁ w₂) again making
+//            P(· | w₁ w₂) sum to 1.  D is the absolute discount n₁ / (n₁ + 2 n₂) stored
+//            in the table.  A context without listed trigrams uses the bigram model.
+// The first word of the text, and a word after a stray letter, use P(w); the second word
+// uses P(w₂ | w₁).
 //
-// The tables are made by tools/make_ngram_tables.py.
+// The unigram and bigram tables are made by tools/make_ngram_tables.py, the trigram tables
+// by tools/count_trigrams.cpp.
 
-enum class ModelKind { Zipf, Unigram, Bigram };
+enum class ModelKind { Unigram, Bigram, Trigram };
 
 // Open-addressing hash map from a (trie node, trie node) pair to a log-probability.
 class PairTable {
 public:
     static uint64_t key(int u, int v) { return (uint64_t)(u + 1) << 32 | (uint32_t)v; }  // never 0
+    static uint64_t key(int u, int v, int w) {        // trie nodes < 2^21; never 0
+        return (uint64_t)(u + 1) << 42 | (uint64_t)v << 21 | (uint64_t)w;
+    }
 
     void reserve(size_t n) {
         size_t cap = 16;
@@ -58,22 +70,37 @@ private:
 };
 
 struct LanguageModel {
-    ModelKind           kind = ModelKind::Zipf;
-    std::string         name = "zipf";
-    std::string         fingerprint = "-";  // FNV-1a of the table files ("-" for zipf)
-    double              stray_logp  = -15;  // a letter outside any word: below every word
+    ModelKind           kind = ModelKind::Trigram;
+    std::string         name = "trigram";
+    std::string         fingerprint;        // FNV-1a of the table files
+    double              stray_logp  = -40;  // a letter outside any word: below every word
+                                            // (rarest word about -18, after a back-off about -23)
     std::vector<double> uni;                // trie node -> log P(w) (word ends)
     std::vector<double> backoff;            // trie node -> log α(w) (bigram)
     PairTable           pairs;              // (node w₁, node w₂) -> log P(w₂ | w₁) (bigram)
+    PairTable           triples;            // (w₁, w₂, w₃) -> log P(w₃ | w₁ w₂) (trigram)
+    PairTable           context;            // (w₁, w₂) -> log α(w₁ w₂) (trigram)
+
+    // log P(v | u) under the bigram model.
+    double bi(int u, int v) const {
+        const double* p = pairs.get(PairTable::key(u, v));
+        return p ? *p : backoff[u] + uni[v];
+    }
+    // log P(w | u v) under the trigram model.
+    double tri(int u, int v, int w) const {
+        if (const double* p = triples.get(PairTable::key(u, v, w))) return *p;
+        const double* a = context.get(PairTable::key(u, v));
+        return (a ? *a : 0) + bi(v, w);
+    }
 };
 
-inline const char* MODEL_NAMES = "zipf, unigram, bigram";
+inline const char* MODEL_NAMES = "unigram, bigram, trigram";
 
 inline bool parse_model_kind(const std::string& s, ModelKind* k)
 {
-    if (s == "zipf")    { *k = ModelKind::Zipf;    return true; }
     if (s == "unigram") { *k = ModelKind::Unigram; return true; }
     if (s == "bigram")  { *k = ModelKind::Bigram;  return true; }
+    if (s == "trigram") { *k = ModelKind::Trigram; return true; }
     return false;
 }
 
@@ -93,19 +120,14 @@ inline void fnv(uint64_t& h, const std::string& s)
 
 } // namespace model_detail
 
-// `txt_dir` holds english_unigrams.txt and english_bigrams.txt.  Throws std::runtime_error.
+// `txt_dir` holds the english_*grams*.txt tables.  Throws std::runtime_error.
 inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::string& txt_dir)
 {
     using namespace model_detail;
     LanguageModel m;
     m.kind = kind;
-    if (kind == ModelKind::Zipf) {
-        m.uni = d.node_logp;
-        return m;
-    }
-    m.name       = kind == ModelKind::Unigram ? "unigram" : "bigram";
-    m.stray_logp = -40;     // rarest word: about -18; rarest word after a bigram back-off: about -23
-    uint64_t fp  = 1469598103934665603ull;
+    m.name = kind == ModelKind::Unigram ? "unigram" : kind == ModelKind::Bigram ? "bigram" : "trigram";
+    uint64_t fp = 1469598103934665603ull;
 
     // Unigram counts.
     const std::string uni_path = txt_dir + "/english_unigrams.txt";
@@ -134,7 +156,7 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
         m.uni[u] = std::log(count[u] / total);
     }
 
-    if (kind == ModelKind::Bigram) {
+    if (kind == ModelKind::Bigram || kind == ModelKind::Trigram) {
         const std::string bi_path = txt_dir + "/english_bigrams.txt";
         const std::string bi_text = read_all(bi_path);
         fnv(fp, bi_text);
@@ -161,6 +183,74 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
         m.backoff.assign(d.trie.ch.size(), 0);
         for (size_t u = 0; u < c1.size(); u++)
             if (listed[u] > 0) m.backoff[u] = std::log((1 - listed[u] / c1[u]) / (1 - listed_p[u]));
+    }
+    if (kind == ModelKind::Trigram) {
+        if (d.trie.ch.size() >= (1u << 21)) throw std::runtime_error("trie too large for trigram keys");
+        auto node = [&](const std::string& w) {
+            int u = d.trie.find(w);
+            return u >= 0 && d.trie.mark[u] ? u : -1;
+        };
+        // Context counts c(w₁ w₂).
+        const std::string ctx_path = txt_dir + "/english_trigram_contexts.txt";
+        const std::string ctx_text = read_all(ctx_path);
+        fnv(fp, ctx_text);
+        PairTable ctx_count;
+        size_t n_ctx = 0;
+        for (char c : ctx_text) n_ctx += c == '\n';
+        ctx_count.reserve(n_ctx);
+        {
+            std::istringstream in(ctx_text);
+            std::string a, b;
+            double c;
+            while (in >> a >> b >> c) {
+                int u = node(a), v = node(b);
+                if (u >= 0 && v >= 0) ctx_count.put(PairTable::key(u, v), c);
+            }
+        }
+        // Trigram counts; the first line holds the discount.
+        const std::string tri_path = txt_dir + "/english_trigrams.txt";
+        const std::string tri_text = read_all(tri_path);
+        fnv(fp, tri_text);
+        std::istringstream in(tri_text);
+        std::string hash_sign, word;
+        double D = -1;
+        if (!(in >> hash_sign >> word >> D) || hash_sign != "#" || word != "discount" || D < 0 || D >= 1)
+            throw std::runtime_error(tri_path + ": first line must be \"# discount D\"");
+        struct Tri { int u, v, w; double c; };
+        std::vector<Tri> list;
+        {
+            std::string a, b, c;
+            double n;
+            while (in >> a >> b >> c >> n) {
+                int u = node(a), v = node(b), w = node(c);
+                if (u >= 0 && v >= 0 && w >= 0) list.push_back({u, v, w, n});
+            }
+        }
+        // Per context: the discounted mass of the listed trigrams, and the bigram mass of
+        // the words they lead to; α(w₁ w₂) = (1 − listed) / (1 − listed_bigram).
+        PairTable listed, listed_bi;
+        listed.reserve(n_ctx);
+        listed_bi.reserve(n_ctx);
+        auto add = [](PairTable& t, uint64_t k, double x) {
+            const double* p = t.get(k);
+            t.put(k, (p ? *p : 0) + x);
+        };
+        m.triples.reserve(list.size());
+        for (const auto& t : list) {
+            const uint64_t k = PairTable::key(t.u, t.v);
+            const double* c12 = ctx_count.get(k);
+            if (!c12 || *c12 < t.c) throw std::runtime_error(tri_path + ": context count missing or too small");
+            const double p = (t.c - D) / *c12;
+            m.triples.put(PairTable::key(t.u, t.v, t.w), std::log(p));
+            add(listed, k, p);
+            add(listed_bi, k, std::exp(m.bi(t.v, t.w)));
+        }
+        m.context.reserve(n_ctx);
+        for (const auto& t : list) {
+            const uint64_t k = PairTable::key(t.u, t.v);
+            if (m.context.get(k)) continue;
+            m.context.put(k, std::log((1 - *listed.get(k)) / std::max(1e-12, 1 - *listed_bi.get(k))));
+        }
     }
     char buf[32];
     std::snprintf(buf, sizeof buf, "%016llx", (unsigned long long)fp);
