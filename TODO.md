@@ -2,7 +2,7 @@
 
 ## Ranking
 
-With GPT-2 rescoring the trigram's best 1,000, the true plaintext comes first for 96% of the
+With GPT-2 rescoring the trigram's best 1,000 (the default is now 20,000), the true plaintext comes first for 96% of the
 phrases in `bench/realistic.py` (81 of 84; the other two are out of the search's reach, and
 "take the last train" is 3rd behind the equally good "take the fast train"). Ideas; each
 can be measured on the cached searches with `python3 bench/realistic.py --cached-only`:
@@ -22,22 +22,39 @@ can be measured on the cached searches with `python3 bench/realistic.py --cached
   decides what reaches GPT-2; more corpus and a lower cutoff would raise the trigram rank
   of real phrases further.
 
-## Custom words: `--dict FILE`
+## Probabilities for custom words
 
-A plaintext is only found if every word is in the dictionary. The list covers more than
-expected ("dont", "london", "email"), but misses e.g. "usa", "covid", "smartphone", "wifi"
-and American "color". An option to add a file of extra words (names, domain terms) would
-cover most gaps; the language model would need a probability for them (e.g. that of the
-rarest listed word). A much larger dictionary grows the search, so this is meant for a few
-hundred words, not a 300,000-word list.
+`crack --words FILE` adds words to the dictionary, but the tables have no counts for them,
+so each gets the smallest count in the unigram table, as if it were as rare as the rarest
+word. Readings with a custom word are then ranked low by the trigram model and seldom reach
+GPT-2's shortlist. In one test on a 25-letter ciphertext, about 200 cryptography and
+modern words added 15.4M candidates (117.0M → 132.5M), mostly through 3-letter
+abbreviations, and the trigram top 10 did not change. Rescoring all of them with GPT-2
+would take about 37 hours (114 sentences per second); `rescore --ranks` can rescore a
+chosen subset. Instead, give every custom word a realistic count before the run:
+
+1. **Web counts** where they exist: about half of such words are in Norvig's
+   `count_1w.txt` (lol 16.1M, app 12.2M, plaintext 456k, ciphertext 220k), on the same
+   scale as `txt/english_unigrams.txt`.
+2. **GPT-2 estimates** for the rest (too new for that corpus, such as github, chatgpt,
+   bitcoin and emoji, or too rare, such as kasiski and playfair): the log
+   probability of the word in a few neutral contexts, mapped to a count by a fit of GPT-2's
+   estimate against the real counts of a few thousand dictionary words. About a second for
+   a few hundred words.
+3. **Trigram counts:** recount the subtitle corpus with the custom words included
+   (`tools/count_trigrams.cpp`, about 2 minutes), so pairs like "the vigenere cipher" get
+   counts where the corpus has them; otherwise the model backs off to the counts of 1-2.
+
+The word file would take an optional count per line (`github 1500000`), and a command would
+fill the counts in with 1-2. An existing index is then updated with `rerank` (about a
+minute, no new search) and `rescore` (GPT-2 on the new shortlist).
 
 ## Faster index building
 
-- The forward pass of the column DP is single-threaded (about 1 min of the 3 min for the
-  stress case); each column can be split across threads.
-- The DP columns are now the only part of the build that grows in memory (candidates are on
-  disk). States are 8 bytes per track plus padding; a compact encoding (17-bit trie nodes)
-  would cut that by about half.
+- The forward pass of the column DP is single-threaded, and now makes two passes per column
+  (one for the per-track state tables, one for the compact codes); each column can be
+  split across threads. With the 81k-word dictionary, key length 12 on 25 letters takes
+  18-21 minutes.
 
 ## Out of scope (recorded so they are not revisited)
 

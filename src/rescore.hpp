@@ -1,6 +1,7 @@
 #pragma once
 #include "gpt2.hpp"
 #include "index.hpp"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,15 @@ std::string lm_sentence(const std::string& plain, const std::string& words);
 
 // The best `top` candidates of the index, rescored and sorted (best first).
 std::vector<Rescored> rescore(IndexReader& idx, const Gpt2& lm, size_t top, int threads);
+
+// Rescore the candidates at `ranks` (trigram ranks, any order) in batches of `batch`, and
+// append each batch to `scores_path` as "rank<TAB>key<TAB>score<TAB>sentence" lines as soon
+// as it is done.  Ranks already in the file are skipped, so an interrupted run resumes where
+// it stopped.  `progress(done, total)` is called after every batch.  Returns every score in
+// the file, sorted best first.
+std::vector<Rescored> rescore_ranks(IndexReader& idx, const Gpt2& lm, const std::vector<size_t>& ranks,
+                                    const std::string& scores_path, int threads, size_t batch,
+                                    const std::function<void(size_t, size_t)>& progress);
 
 std::string shortlist_path(const std::string& index_path);
 

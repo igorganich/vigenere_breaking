@@ -92,6 +92,32 @@ if "$BIN" show "$WORK/plain.txt" --count 2>/dev/null; then fail "show rejects a 
 else                                                       pass "show rejects a file that is not an index"
 fi
 
+# ── Custom words (--words) ────────────────────────────────────────────────────
+# "thezorblaxisred" needs the made-up word "zorblax": found only with it, and the index
+# can then only be read with the saved word list.
+printf 'thezorblaxisred' > "$WORK/plain.txt"
+echo abc | "$BIN" -e "$WORK/plain.txt" 2>/dev/null > "$WORK/cipher.txt"
+printf '# test words\nzorblax\n' > "$WORK/words.txt"
+"$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --top 0 --max-key-length 4 --no-lm 2>/dev/null
+if "$BIN" show "$WORK/run.idx" --rank-of thezorblaxisred | grep -q "not among"; then
+    pass "custom words: a plaintext with an unknown word is not found without --words"
+else
+    fail "custom words: a plaintext with an unknown word was found without --words"
+fi
+"$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --top 0 --max-key-length 4 --no-lm --words "$WORK/words.txt" 2>/dev/null
+line=$("$BIN" show "$WORK/run.idx" --rank-of thezorblaxisred)
+if [[ $line == *": rank "* ]] && grep -qx zorblax "$WORK/run.idx.words"; then
+    pass "custom words: found with --words (${line#*: }), list saved next to the index"
+else
+    fail "custom words: not found with --words: $line"
+fi
+mv "$WORK/run.idx.words" "$WORK/saved.words"
+if "$BIN" show "$WORK/run.idx" --count 2>/dev/null; then fail "custom words: index read without its word list"
+else                                                     pass "custom words: index rejected without its word list"
+fi
+rm -f "$WORK/saved.words"
+rm -f "$WORK/words.txt"
+
 # ── GPT-2 stage (needs models/gpt2, from tools/get_gpt2.sh) ─────────────────────
 # "money talks" with key "merely": the trigram model ranks it 11th, GPT-2 first.
 if [[ -f "$(dirname "$BIN")/../models/gpt2/model.safetensors" ]]; then
@@ -104,6 +130,18 @@ if [[ -f "$(dirname "$BIN")/../models/gpt2/model.safetensors" ]]; then
     else
         fail "GPT-2: money talks / merely not ranked first: $best"
     fi
+    printf '3\n1\n2\n' > "$WORK/ranks.txt"
+    "$BIN" rescore "$WORK/run.idx" --ranks "$WORK/ranks.txt" --scores "$WORK/scores.tsv" --print 0 2>/dev/null
+    printf '1\n2\n3\n4\n' > "$WORK/ranks.txt"
+    "$BIN" rescore "$WORK/run.idx" --ranks "$WORK/ranks.txt" --scores "$WORK/scores.tsv" --print 0 2>/dev/null
+    if [[ $(cut -f1 "$WORK/scores.tsv" | sort -n | tr '\n' ' ') == "1 2 3 4 " ]] &&
+       [[ $(awk -F'\t' 'NF == 4 && $4 ~ /\.$/' "$WORK/scores.tsv" | wc -l) -eq 4 ]]; then
+        pass "GPT-2: rescoring chosen ranks resumes without repeating any"
+    else
+        fail "GPT-2: rescore --ranks: $(cut -f1 "$WORK/scores.tsv" | tr '\n' ' ')"
+    fi
+    rm -f "$WORK/ranks.txt"
+    rm -f "$WORK/scores.tsv"
     "$BIN" rerank "$WORK/run.idx" "$WORK/run.idx" --model bigram --top 0 2>/dev/null
     if [[ ! -e "$WORK/run.idx.lm" ]] && ! "$BIN" show "$WORK/run.idx" --lm 1 2>/dev/null; then
         pass "GPT-2: the shortlist is dropped when the index is re-ranked"

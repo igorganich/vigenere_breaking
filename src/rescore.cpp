@@ -46,6 +46,72 @@ std::vector<Rescored> rescore(IndexReader& idx, const Gpt2& lm, size_t top, int 
     return out;
 }
 
+namespace {
+
+void sort_rescored(std::vector<Rescored>& v)
+{
+    std::stable_sort(v.begin(), v.end(), [](const Rescored& a, const Rescored& b){
+        return a.score != b.score ? a.score > b.score : a.trigram_rank < b.trigram_rank;
+    });
+}
+
+std::vector<Rescored> read_scores(const std::string& path)
+{
+    std::vector<Rescored> out;
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream in(line);
+        Rescored r;
+        std::string score;
+        if (!(in >> r.trigram_rank >> r.key >> score)) continue;   // a line cut off by an interruption
+        r.score = std::stod(score);
+        std::getline(in >> std::ws, r.sentence);
+        if (!r.sentence.empty() && r.sentence.back() == '.') out.push_back(r);
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<Rescored> rescore_ranks(IndexReader& idx, const Gpt2& lm, const std::vector<size_t>& ranks,
+                                    const std::string& scores_path, int threads, size_t batch,
+                                    const std::function<void(size_t, size_t)>& progress)
+{
+    std::vector<size_t> done_ranks;
+    for (const auto& r : read_scores(scores_path)) done_ranks.push_back(r.trigram_rank);
+    std::sort(done_ranks.begin(), done_ranks.end());
+    std::vector<size_t> todo;
+    for (size_t r : ranks)
+        if (!std::binary_search(done_ranks.begin(), done_ranks.end(), r)) todo.push_back(r);
+    std::sort(todo.begin(), todo.end());
+    todo.erase(std::unique(todo.begin(), todo.end()), todo.end());
+
+    std::ofstream f(scores_path, std::ios::app);
+    if (!f) throw std::runtime_error("cannot write " + scores_path);
+    const size_t total = done_ranks.size() + todo.size();
+    for (size_t i = 0; i < todo.size(); i += batch) {
+        std::vector<Candidate> cands;
+        std::vector<std::string> sentences;
+        for (size_t j = i; j < std::min(todo.size(), i + batch); j++) {
+            cands.push_back(idx.range(todo[j], todo[j]).at(0));
+            sentences.push_back(lm_sentence(cands.back().plain, cands.back().words));
+        }
+        const auto lp = lm.logprob(sentences, threads);
+        char buf[64];
+        for (size_t j = 0; j < cands.size(); j++) {
+            std::snprintf(buf, sizeof buf, "%.17g", lp[j] - (double)cands[j].key.size() * std::log((double)ALPHA));
+            f << cands[j].rank << '\t' << cands[j].key << '\t' << buf << '\t' << sentences[j] << '\n';
+        }
+        if (!f.flush()) throw std::runtime_error("error writing " + scores_path);
+        progress(done_ranks.size() + std::min(todo.size(), i + batch), total);
+    }
+    f.close();
+    auto all = read_scores(scores_path);
+    sort_rescored(all);
+    return all;
+}
+
 std::string shortlist_path(const std::string& index_path) { return index_path + ".lm"; }
 
 namespace {

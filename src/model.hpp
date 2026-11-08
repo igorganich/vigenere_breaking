@@ -143,6 +143,14 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
             if (u >= 0 && d.trie.mark[u]) count[u] = c;
         }
     }
+    // Custom words (Dictionary::extra) that the table lacks get its smallest count, the count
+    // the table already gives words never seen in the corpus.
+    double floor = 0;
+    for (double c : count) if (c > 0 && (floor == 0 || c < floor)) floor = c;
+    for (const auto& w : d.extra) {
+        int u = d.trie.find(w);
+        if (count[u] <= 0) count[u] = floor;
+    }
     double total = 0;
     for (const auto& w : d.words) {
         int u = d.trie.find(w);

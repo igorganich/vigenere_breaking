@@ -4,6 +4,8 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <new>
+#include <type_traits>
 #include <thread>
 
 // ── Column DP over key letters ────────────────────────────────────────────────
@@ -22,6 +24,8 @@
 //   pending                  set when an S-mode tail was closed: the tail's suffix node,
 //                            checked at the end against the head the previous track left
 // Words spanning track boundaries are verified once all columns are done (accept()).
+//
+// Each column is stored compactly (Layer: 8 bytes per state).
 //
 // Keys are then read off by walking the columns again, keeping only states that can still
 // reach an accepted end and carrying, for each key prefix, the set of states it can be in;
@@ -169,48 +173,147 @@ std::vector<State<M>> initial_states(const Problem& P)
 
 static constexpr size_t SINK_BATCH = 1 << 16;   // keys handed to the sink at a time
 
+// One column's distinct states, stored compactly.  A state is a tuple of track states, but
+// each track takes far fewer distinct values in a column than there are tuples, so a state
+// is stored as one 64-bit code: the index of each track's state in that track's sorted
+// table, packed `bits[t]` wide.  Codes are kept sorted, so a state's position in the column
+// is a binary search.  This takes 8 bytes per state instead of 8 per track.  With 4-5
+// tracks (key lengths 5-8, small columns) the codes can need more than 64 bits; they are
+// 128 bits wide there.
+__extension__ typedef unsigned __int128 uint128;
+template <int M>
+using Code = std::conditional_t<(M <= 3), uint64_t, uint128>;
+
+template <int M>
+struct Layer {
+    static constexpr int BITS = sizeof(Code<M>) * 8;
+    std::vector<Code<M>>                  codes;   // sorted, unique
+    std::array<std::vector<uint64_t>, M>  track;   // per track: its distinct states, sorted
+    std::array<int, M>                    shift{};
+
+    // Fix the per-track tables (sorted, unique) and the bit layout.  Throws std::bad_alloc
+    // (reported as out of memory) if the codes would not fit in BITS bits.
+    void set_tracks(std::array<std::vector<uint64_t>, M> tables, int T) {
+        track = std::move(tables);
+        int pos = 0;
+        for (int t = T - 1; t >= 0; t--) {
+            shift[t] = pos;
+            int b = 1;
+            while (b < 63 && (uint64_t{1} << b) < track[t].size()) b++;
+            pos += b;
+        }
+        if (pos > BITS) throw std::bad_alloc();
+    }
+    // The code of state s, or NONE if a track state is not in its table.
+    static constexpr Code<M> NONE = ~Code<M>{0};
+    Code<M> encode(const State<M>& s, int T) const {
+        Code<M> c = 0;
+        for (int t = 0; t < T; t++) {
+            auto it = std::lower_bound(track[t].begin(), track[t].end(), s[t]);
+            if (it == track[t].end() || *it != s[t]) return NONE;
+            c |= (Code<M>)(it - track[t].begin()) << shift[t];
+        }
+        return c;
+    }
+    State<M> decode(Code<M> c, int T) const {
+        State<M> s{};
+        for (int t = 0; t < T; t++) {
+            const int width = (t == 0 ? BITS : shift[t - 1]) - shift[t];
+            const Code<M> mask = width >= BITS ? ~Code<M>{0} : (Code<M>{1} << width) - 1;
+            s[t] = track[t][(size_t)((c >> shift[t]) & mask)];
+        }
+        return s;
+    }
+    // Position of state s in the column, or -1.
+    long find(const State<M>& s, int T) const {
+        const Code<M> c = encode(s, T);
+        if (c == NONE) return -1;
+        auto it = std::lower_bound(codes.begin(), codes.end(), c);
+        return (it != codes.end() && *it == c) ? (long)(it - codes.begin()) : -1L;
+    }
+    State<M> at(size_t i, int T) const { return decode(codes[i], T); }
+    size_t   size() const { return codes.size(); }
+};
+
+// Sorted, unique values, deduplicated in batches so the raw list never grows far beyond
+// the number of distinct values.
+template <class V>
+class SortedSet {
+public:
+    void add(V x) { v_.push_back(x); if (v_.size() - clean_ > 8'000'000) compact(); }
+    std::vector<V> take() { compact(); v_.shrink_to_fit(); return std::move(v_); }
+private:
+    void compact() {
+        std::sort(v_.begin() + clean_, v_.end());
+        v_.erase(std::unique(v_.begin() + clean_, v_.end()), v_.end());
+        std::inplace_merge(v_.begin(), v_.begin() + clean_, v_.end());
+        v_.erase(std::unique(v_.begin(), v_.end()), v_.end());
+        clean_ = v_.size();
+    }
+    std::vector<V> v_;
+    size_t clean_ = 0;
+};
+
 template <int M>
 size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sink, SearchStats* stats)
 {
-    // Forward: the distinct states after each column.  Successors are deduplicated in
-    // batches so the raw list never grows far beyond the number of distinct states.
-    std::vector<std::vector<State<M>>> layers{initial_states<M>(P)};
+    const int T = P.T;
+
+    // Forward: the distinct states after each column.  Each column is built in two passes
+    // over the successors of the previous one: the first collects each track's distinct
+    // states (the tables of the compact codes), the second the distinct codes.
+    std::vector<Layer<M>> layers(1);
+    {
+        const auto init = initial_states<M>(P);
+        std::array<std::vector<uint64_t>, M> tables;
+        for (int t = 0; t < T; t++) {
+            for (const auto& s : init) tables[t].push_back(s[t]);
+            std::sort(tables[t].begin(), tables[t].end());
+            tables[t].erase(std::unique(tables[t].begin(), tables[t].end()), tables[t].end());
+        }
+        layers[0].set_tracks(std::move(tables), T);
+        for (const auto& s : init) layers[0].codes.push_back(layers[0].encode(s, T));
+        std::sort(layers[0].codes.begin(), layers[0].codes.end());
+        layers[0].codes.erase(std::unique(layers[0].codes.begin(), layers[0].codes.end()), layers[0].codes.end());
+    }
     for (int j = 0; j < P.kl; j++) {
-        std::vector<State<M>> next;
-        size_t clean = 0;   // next[0..clean) is sorted and unique
-        auto compact = [&]{
-            std::sort(next.begin() + clean, next.end());
-            next.erase(std::unique(next.begin() + clean, next.end()), next.end());
-            std::inplace_merge(next.begin(), next.begin() + clean, next.end());
-            next.erase(std::unique(next.begin(), next.end()), next.end());
-            clean = next.size();
+        const Layer<M>& prev = layers.back();
+        auto each_successor = [&](auto&& fn) {
+            for (size_t i = 0; i < prev.size(); i++) {
+                const State<M> s = prev.at(i, T);
+                for (int k = 0; k < ALPHA; k++) successors<M>(P, s, j, k, fn);
+            }
         };
-        for (const auto& s : layers.back())
-            for (int k = 0; k < ALPHA; k++)
-                successors<M>(P, s, j, k, [&](const State<M>& o){
-                    next.push_back(o);
-                    if (next.size() - clean > 8'000'000) compact();
-                });
-        compact();
+        Layer<M> next;
+        {
+            std::array<SortedSet<uint64_t>, M> per_track;
+            each_successor([&](const State<M>& o){ for (int t = 0; t < T; t++) per_track[t].add(o[t]); });
+            std::array<std::vector<uint64_t>, M> tables;
+            for (int t = 0; t < T; t++) tables[t] = per_track[t].take();
+            next.set_tracks(std::move(tables), T);
+        }
+        {
+            SortedSet<Code<M>> codes;
+            each_successor([&](const State<M>& o){ codes.add(next.encode(o, T)); });
+            next.codes = codes.take();
+        }
         if (stats) stats->peak_states = std::max(stats->peak_states, next.size());
-        if (next.empty()) return 0;
+        if (next.size() == 0) return 0;
         layers.push_back(std::move(next));
     }
 
     // Backward: which states can still reach an accepted end.
     const int L = P.kl;
-    auto index = [&](int j, const State<M>& s) {
-        auto it = std::lower_bound(layers[j].begin(), layers[j].end(), s);
-        return (it != layers[j].end() && *it == s) ? (long)(it - layers[j].begin()) : -1L;
-    };
+    auto index = [&](int j, const State<M>& s) { return layers[j].find(s, T); };
     std::vector<std::vector<char>> live(L + 1);
     live[L].resize(layers[L].size());
-    parallel_for(layers[L].size(), threads, [&](size_t i){ live[L][i] = accept<M>(P, layers[L][i]); });
+    parallel_for(layers[L].size(), threads, [&](size_t i){ live[L][i] = accept<M>(P, layers[L].at(i, T)); });
     for (int j = L - 1; j >= 0; j--) {
         live[j].assign(layers[j].size(), 0);
         parallel_for(layers[j].size(), threads, [&](size_t i){
+            const State<M> s = layers[j].at(i, T);
             for (int k = 0; k < ALPHA && !live[j][i]; k++)
-                successors<M>(P, layers[j][i], j, k, [&](const State<M>& o){
+                successors<M>(P, s, j, k, [&](const State<M>& o){
                     long x = index(j + 1, o);
                     if (x >= 0 && live[j + 1][x]) live[j][i] = 1;
                 });
@@ -238,7 +341,7 @@ size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sin
             if (only >= 0 && k != only) continue;
             std::vector<long> nx;
             for (long i : set_j)
-                successors<M>(P, layers[j][i], j, k, [&](const State<M>& o){
+                successors<M>(P, layers[j].at(i, T), j, k, [&](const State<M>& o){
                     long x = index(j + 1, o);
                     if (x >= 0 && live[j + 1][x]) nx.push_back(x);
                 });
