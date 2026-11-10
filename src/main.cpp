@@ -57,19 +57,19 @@ static std::string read_file(const char* path)
     return {std::istreambuf_iterator<char>(f), {}};
 }
 
-static std::string to_lower_alpha(const std::string& s)
+// `s` padded with spaces to `width` characters (UTF-8 letters count once).
+static std::string pad(const std::string& s, size_t width)
 {
-    std::string out;
-    for (unsigned char c : s)
-        if (std::isalpha(c)) out += (char)std::tolower(c);
-    return out;
+    size_t chars = 0;
+    for (unsigned char c : s) chars += (c & 0xC0) != 0x80;
+    return chars >= width ? s : s + std::string(width - chars, ' ');
 }
 
 static void usage(const char* prog)
 {
     std::cerr <<
         "usage:\n"
-        "  " << prog << " -e <plaintext_file>\n"
+        "  " << prog << " -e <plaintext_file> [--lang L]\n"
         "      encrypt; reads the key from stdin\n"
         "  " << prog << " crack <ciphertext_file> <index_file> [options]\n"
         "      find every key (length 1-12) whose plaintext splits fully into dictionary words,\n"
@@ -83,9 +83,9 @@ static void usage(const char* prog)
         "                            (default 1000000000; candidates are kept on disk: about\n"
         "                            24 bytes each while building, 8 in the index)\n"
         "        --model M           ranking model: unigram, bigram or trigram (default trigram)\n"
-        "        --lang L            plaintext language: en (default) or de (German, with\n"
-        "                            ä ö ü ß written ae oe ue ss); later commands read it\n"
-        "                            from the index\n"
+        "        --lang L            plaintext language: en (default), de (German, with\n"
+        "                            ä ö ü ß written ae oe ue ss) or uk (Ukrainian, its\n"
+        "                            33 letters); later commands read it from the index\n"
         "        --words FILE        add the words of FILE (one or more per line, # comments) to the\n"
         "                            dictionary; saved as <index_file>.words for later commands\n"
         "        --threads N         worker threads (default: all)\n"
@@ -105,16 +105,18 @@ static void usage(const char* prog)
     std::exit(1);
 }
 
-static void print(const Candidate& c)
+// Key, plaintext and word split are in internal form; the dictionary's alphabet turns them
+// into text.
+static void print(const Candidate& c, const Dictionary& d)
 {
-    std::printf("%10zu  key %-12s  %s  %s  score %.2f\n", c.rank, c.key.c_str(), c.plain.c_str(),
-                c.words.c_str(), c.score);
+    std::printf("%10zu  key %s  %s  %s  score %.2f\n", c.rank, pad(d.alphabet.decode(c.key), 12).c_str(),
+                d.alphabet.decode(c.plain).c_str(), d.alphabet.decode(c.words).c_str(), c.score);
 }
 
 static void print_lm(size_t rank, const Rescored& r)
 {
-    std::printf("%10zu  key %-12s  %-44s  trigram #%-7zu  score %.2f\n", rank, r.key.c_str(), r.sentence.c_str(),
-                r.trigram_rank, r.score);
+    std::printf("%10zu  key %s  %s  trigram #%-7zu  score %.2f\n", rank, pad(r.key, 12).c_str(),
+                pad(r.sentence, 44).c_str(), r.trigram_rank, r.score);
 }
 
 // Rescore the best `top` of an index with GPT-2, save the shortlist, print the best `print_n`.
@@ -144,9 +146,9 @@ static Dictionary load(const std::string& lang, const std::string& words_file = 
     const Language& l = language(lang);
     try {
         std::vector<std::string> extra;
-        if (!words_file.empty()) extra = read_word_file(words_file);
-        else if (!index_path.empty() && std::ifstream(words_path(index_path))) extra = read_word_file(words_path(index_path));
-        Dictionary d = load_dictionary(TXT_DIR + "/" + l.code + "/words.txt", extra, l.singles);
+        if (!words_file.empty()) extra = read_word_file(words_file, l.alphabet);
+        else if (!index_path.empty() && std::ifstream(words_path(index_path))) extra = read_word_file(words_path(index_path), l.alphabet);
+        Dictionary d = load_dictionary(TXT_DIR + "/" + l.code + "/words.txt", extra, l.singles, l.alphabet);
         d.lang = l.code;
         load_display(d, TXT_DIR + "/" + l.code + "/display.txt");
         return d;
@@ -161,7 +163,7 @@ static void save_words(const Dictionary& dict, const std::string& index_path)
     std::remove(p.c_str());
     if (dict.extra.empty()) return;
     std::ofstream f(p);
-    for (const auto& w : dict.extra) f << w << '\n';
+    for (const auto& w : dict.extra) f << dict.alphabet.decode(w) << '\n';
     if (!f) throw std::runtime_error("cannot write " + p);
 }
 
@@ -178,17 +180,25 @@ static ModelKind model_arg(const char* s)
     return k;
 }
 
-static int cmd_encrypt(const char* path)
+static int cmd_encrypt(int argc, char** argv)
 {
-    std::string plain = to_lower_alpha(read_file(path));
+    std::string lang = "en";
+    for (int i = 3; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--lang" && i + 1 < argc) lang = argv[++i];
+        else { std::cerr << "unknown option: " << a << '\n'; usage(argv[0]); }
+    }
+    const Alphabet& ab = language(lang).alphabet;
+    std::string plain = ab.letters_of(read_file(argv[2]));
     if (plain.empty()) { std::cerr << "empty plaintext\n"; return 1; }
     std::cerr << "key: ";
     std::string key;
     std::cin >> key;
-    key = to_lower_alpha(key);
+    key = ab.letters_of(key);
     if (key.empty()) { std::cerr << "invalid key\n"; return 1; }
-    for (size_t i = 0; i < plain.size(); i++) std::cout << vig_enc(plain[i], key[i % key.size()]);
-    std::cout << '\n';
+    std::string cipher;
+    for (size_t i = 0; i < plain.size(); i++) cipher += vig_enc(plain[i], key[i % key.size()], ab.size());
+    std::cout << ab.decode(cipher) << '\n';
     return 0;
 }
 
@@ -216,7 +226,7 @@ static int cmd_crack(int argc, char** argv)
     if (opt.max_key_length < 1 || opt.max_key_length > 12) {
         std::cerr << "--max-key-length must be 1..12\n"; return 1;
     }
-    std::string cipher = to_lower_alpha(read_file(argv[2]));
+    std::string cipher = language(lang).alphabet.letters_of(read_file(argv[2]));
     if (cipher.size() < 2 || cipher.size() > (size_t)MAX_CIPHER_LEN) {
         std::cerr << "ciphertext must have 2.." << MAX_CIPHER_LEN << " letters (has " << cipher.size() << ")\n";
         return 1;
@@ -240,7 +250,7 @@ static int cmd_crack(int argc, char** argv)
                 std::fprintf(stderr, "note: GPT-2 not found in %s (run %s); "
                              "showing the %s ranking\n", gpt2_dir(dict).c_str(), language(lang).get_gpt2.c_str(),
                              model.name.c_str());
-            for (const auto& c : idx.range(1, top)) print(c);
+            for (const auto& c : idx.range(1, top)) print(c, dict);
         }
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
@@ -269,7 +279,7 @@ static int cmd_rerank(int argc, char** argv)
         if (std::string(argv[2]) != argv[3]) save_words(dict, argv[3]);
         rerank_index(argv[2], argv[3], dict, model, threads);
         IndexReader idx(argv[3], dict, model);
-        for (const auto& c : idx.range(1, top)) print(c);
+        for (const auto& c : idx.range(1, top)) print(c, dict);
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
         return 1;
@@ -359,15 +369,16 @@ static int cmd_show(int argc, char** argv)
             return 0;
         }
         if (mode == "--count") {
-            std::printf("ciphertext %s: %zu candidates\n", idx.cipher().c_str(), count);
+            std::printf("ciphertext %s: %zu candidates\n", dict.alphabet.decode(idx.cipher()).c_str(), count);
             for (auto [kl, c] : idx.summary().per_key_length) std::printf("  key length %2d: %zu\n", kl, c);
             for (const auto& note : idx.summary().notes) std::printf("  note: %s\n", note.c_str());
             return 0;
         }
         if (mode == "--rank-of" && argc > 4) {
-            std::string plain = to_lower_alpha(argv[4]);
-            if (size_t r = idx.rank_of(plain)) std::printf("%s: rank %zu of %zu\n", plain.c_str(), r, count);
-            else                               std::printf("%s: not among the %zu candidates\n", plain.c_str(), count);
+            std::string plain = dict.alphabet.letters_of(argv[4]);
+            const std::string text = dict.alphabet.decode(plain);
+            if (size_t r = idx.rank_of(plain)) std::printf("%s: rank %zu of %zu\n", text.c_str(), r, count);
+            else                               std::printf("%s: not among the %zu candidates\n", text.c_str(), count);
             return 0;
         }
         size_t first, last;
@@ -378,7 +389,7 @@ static int cmd_show(int argc, char** argv)
         if (first < 1 || first > count) {
             std::cerr << "rank out of range (1.." << count << ")\n"; return 1;
         }
-        for (const auto& c : idx.range(first, last)) print(c);
+        for (const auto& c : idx.range(first, last)) print(c, dict);
     } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
         return 1;
@@ -390,7 +401,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3) usage(argv[0]);
     const std::string cmd = argv[1];
-    if (cmd == "-e")    return cmd_encrypt(argv[2]);
+    if (cmd == "-e")    return cmd_encrypt(argc, argv);
     if (cmd == "crack") return cmd_crack(argc, argv);
     if (cmd == "rerank") return cmd_rerank(argc, argv);
     if (cmd == "rescore") return cmd_rescore(argc, argv);

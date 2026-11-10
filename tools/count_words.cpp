@@ -3,15 +3,16 @@
 //   count_words MIN_COUNT < corpus.txt > counts.txt
 //
 // The corpus is read line by line (one sentence or subtitle line per line, UTF-8).  A word
-// is a run of letters; apostrophes are dropped ("don't" -> "dont") and anything else
-// separates words.  Words are reduced to the cipher alphabet a-z: letters are lowercased
-// and German umlauts and ß are transliterated as ciphers write them (ä -> ae, ö -> oe,
-// ü -> ue, ß -> ss).  A word with any other letter (é, ñ, Cyrillic, ...) is skipped.
+// is a run of letters and apostrophes, normalized as tools/normalize.hpp describes: Latin
+// letters lowercased with German umlauts and ß transliterated (ä -> ae ... ß -> ss),
+// Ukrainian letters lowercased in UTF-8, apostrophes dropped ("don't" -> "dont",
+// "м'ясо" -> "мясо").  A word with any other letter (é, ñ, Russian ы, ...) is skipped.
 //
 // Output, most frequent first, for words seen at least MIN_COUNT times:
 //   word count display
 // where `display` is the word's most frequent spelling in the corpus not counting the first
-// word of a line (whose capital letter says nothing): "schoen 12345 schön", "haus 999 Haus".
+// word of a line (whose capital letter says nothing): "schoen 12345 schön", "haus 999 Haus",
+// "мясо 3105 м'ясо".
 //
 // Build: g++ -O2 -std=c++17 -o count_words tools/count_words.cpp
 
@@ -21,6 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "normalize.hpp"
 
 namespace {
 
@@ -28,37 +30,6 @@ struct Entry {
     uint64_t count = 0;
     std::unordered_map<std::string, uint64_t> forms;   // spelling -> count (not line-initial)
 };
-
-// Append the a-z form of one UTF-8 letter to `out`; false if it has none.
-bool to_cipher(const std::string& s, size_t& i, std::string& out, std::string& orig)
-{
-    const unsigned char c = (unsigned char)s[i];
-    if (c < 0x80) {
-        if (!std::isalpha(c)) return false;
-        out += (char)std::tolower(c); orig += (char)c; i++;
-        return true;
-    }
-    if (c == 0xC3 && i + 1 < s.size()) {
-        const unsigned char d = (unsigned char)s[i + 1];
-        const char* t = nullptr;
-        switch (d) {
-            case 0xA4: case 0x84: t = "ae"; break;     // ä Ä
-            case 0xB6: case 0x96: t = "oe"; break;     // ö Ö
-            case 0xBC: case 0x9C: t = "ue"; break;     // ü Ü
-            case 0x9F:            t = "ss"; break;     // ß
-        }
-        if (!t) return false;
-        out += t; orig += s.substr(i, 2); i += 2;
-        return true;
-    }
-    return false;
-}
-
-bool is_letter_start(const std::string& s, size_t i)
-{
-    const unsigned char c = (unsigned char)s[i];
-    return c >= 0x80 || std::isalpha(c);
-}
 
 } // namespace
 
@@ -73,21 +44,20 @@ int main(int argc, char** argv)
     while (std::getline(std::cin, line)) {
         bool first = true;
         for (size_t i = 0; i < line.size(); ) {
-            if (!is_letter_start(line, i)) { i++; continue; }
             std::string w, orig;
-            bool ok = true;
-            while (i < line.size()) {
-                if (line[i] == '\'') { i++; continue; }
-                if (!is_letter_start(line, i)) break;
+            bool foreign = false, any = false;
+            for (;;) {                                   // one word: letters and apostrophes
+                if (i >= line.size()) break;
                 const size_t before = i;
-                if (!to_cipher(line, i, w, orig)) {
-                    ok = false;
-                    // skip the rest of this word: one UTF-8 sequence at a time
-                    i = before + 1;
-                    while (i < line.size() && ((unsigned char)line[i] & 0xC0) == 0x80) i++;
-                }
+                const norm::Kind k = norm::next(line, i, w, orig);
+                if (k == norm::Separator) { if (!any) continue; i = before + 1; break; }
+                if (k == norm::Foreign) foreign = true;
+                any = true;
             }
-            if (ok && !w.empty()) {
+            if (!any) continue;
+            while (!orig.empty() && orig.back() == '\'') orig.pop_back();       // quotes around a word
+            while (!orig.empty() && orig.front() == '\'') orig.erase(0, 1);
+            if (!foreign && !w.empty()) {
                 Entry& e = words[w];
                 e.count++;
                 if (!first) e.forms[orig]++;

@@ -11,9 +11,24 @@
 
 namespace {
 
-inline uint64_t make_record(int kl, uint64_t code) { return (uint64_t)kl << 58 | code; }
-inline int      record_kl(uint64_t r)   { return (int)(r >> 58); }
-inline uint64_t record_code(uint64_t r) { return r & ((1ull << 58) - 1); }
+// A key as one 8-byte record.  With 26 letters: the key length in the top 6 bits and the key
+// packed base 26 below.  With a larger alphabet of A letters (33¹² does not fit in 58 bits):
+// the key in bijective base A + 1, Σ (letter(key[i]) + 1) · (A + 1)^i, whose digit count is
+// the key length (34¹² < 2⁶³).
+inline uint64_t make_record(const std::string& key, int A)
+{
+    if (A == 26) return (uint64_t)key.size() << 58 | pack_key(key, A);
+    uint64_t r = 0, p = 1;
+    for (char c : key) { r += (uint64_t)(letter_index(c) + 1) * p; p *= (uint64_t)(A + 1); }
+    return r;
+}
+inline std::string record_key(uint64_t r, int A)
+{
+    if (A == 26) return unpack_key(r & ((1ull << 58) - 1), (int)(r >> 58), A);
+    std::string key;
+    for (; r; r /= (uint64_t)(A + 1)) key += letter_char((int)(r % (uint64_t)(A + 1)) - 1);
+    return key;
+}
 
 std::string hex(uint64_t v)
 {
@@ -139,8 +154,10 @@ void write_ranked(const std::string& cipher, const Dictionary& dict, const Langu
     auto t0 = Clock::now();
     chunk = std::max<size_t>(chunk, 1);
     TempFiles temp(path);
+    const int A = dict.alphabet.size();
 
-    std::string h = "VIGIDX 1\ncipher " + cipher + "\nlang " + dict.lang + "\ndict " + hex(dict.fingerprint) + " " +
+    // The header holds the ciphertext as text (UTF-8), not in internal form.
+    std::string h = "VIGIDX 1\ncipher " + dict.alphabet.decode(cipher) + "\nlang " + dict.lang + "\ndict " + hex(dict.fingerprint) + " " +
                     std::to_string(dict.words.size()) + "\nmodel " + model.name + " " + model.fingerprint +
                     "\nmax_key_length " + std::to_string(max_key_length) +
                     "\ncount " + std::to_string(count) + "\n";
@@ -164,9 +181,8 @@ void write_ranked(const std::string& cipher, const Dictionary& dict, const Langu
             if (m && std::fread(records.data(), 8, m, in) != m) throw std::runtime_error(src + " is truncated");
             entries.resize(m);
             parallel_for(m, threads, [&](size_t i){
-                const int kl = record_kl(records[i]);
-                entries[i] = {candidate_score(dict, model, vig_decrypt(cipher, unpack_key(record_code(records[i]), kl)), kl),
-                              records[i]};
+                const std::string key = record_key(records[i], A);
+                entries[i] = {candidate_score(dict, model, vig_decrypt(cipher, key, A), (int)key.size()), records[i]};
             });
             parallel_sort(entries, threads);
             done += m;
@@ -246,6 +262,7 @@ IndexSummary build_index(const std::string& cipher, const Dictionary& dict, cons
     auto since = [](Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); };
     const auto start = Clock::now();
     const int  n = (int)cipher.size();
+    const int  A = dict.alphabet.size();
     const int  threads = opt.threads > 0 ? opt.threads : std::max(1, (int)std::thread::hardware_concurrency());
 
     IndexSummary sum;
@@ -274,8 +291,10 @@ IndexSummary build_index(const std::string& cipher, const Dictionary& dict, cons
             find_keys(cipher, kl, dict, threads, room, [&](const uint64_t* k, size_t m){
                 std::vector<uint64_t> recs;
                 recs.reserve(m);
-                for (size_t i = 0; i < m; i++)
-                    if (expanded_period(unpack_key(k[i], kl), n) == kl) recs.push_back(make_record(kl, k[i]));
+                for (size_t i = 0; i < m; i++) {
+                    const std::string key = unpack_key(k[i], kl, A);
+                    if (expanded_period(key, n) == kl) recs.push_back(make_record(key, A));
+                }
                 std::lock_guard<std::mutex> lock(mu);
                 write_or_throw(recs.data(), 8, recs.size(), keys, keys_path);
                 kept += recs.size();
@@ -320,7 +339,7 @@ IndexSummary rerank_index(const std::string& in, const std::string& out, const D
         if (h.dict != hex(dict.fingerprint)) throw std::runtime_error(in + " was built with a different dictionary");
         if (size < (long)(INDEX_HEADER_BYTES + 8 * h.sum.count)) throw std::runtime_error(in + " is truncated");
     }
-    write_ranked(h.cipher, dict, model, h.max_key_length, threads, h.sum, in, (long)INDEX_HEADER_BYTES,
+    write_ranked(dict.alphabet.letters_of(h.cipher), dict, model, h.max_key_length, threads, h.sum, in, (long)INDEX_HEADER_BYTES,
                  h.sum.count, sort_chunk, out);
     std::fprintf(stderr, "wrote %s: %zu candidates ranked by %s (%.1fs in total)\n", out.c_str(), h.sum.count,
                  model.name.c_str(), std::chrono::duration<double>(Clock::now() - start).count());
@@ -351,7 +370,7 @@ IndexReader::IndexReader(const std::string& path, const Dictionary& dict, const 
     if (!f_) throw std::runtime_error("cannot open " + path);
     Header h;
     try { h = read_header(f_, path); } catch (...) { std::fclose(f_); f_ = nullptr; throw; }
-    cipher_  = h.cipher;
+    cipher_  = dict.alphabet.letters_of(h.cipher);
     summary_ = h.sum;
     std::string why;
     if (h.lang != dict.lang)
@@ -372,11 +391,11 @@ IndexReader::~IndexReader() { if (f_) std::fclose(f_); }
 Candidate IndexReader::decode(size_t rank, uint64_t record) const
 {
     Candidate c;
-    const int kl = record_kl(record);
+    const int A = dict_.alphabet.size();
     c.rank  = rank;
-    c.key   = unpack_key(record_code(record), kl);
-    c.plain = vig_decrypt(cipher_, c.key);
-    c.score = candidate_score(dict_, model_, c.plain, kl, &c.words);   // as when ranked
+    c.key   = record_key(record, A);
+    c.plain = vig_decrypt(cipher_, c.key, A);
+    c.score = candidate_score(dict_, model_, c.plain, (int)c.key.size(), &c.words);   // as when ranked
     return c;
 }
 
@@ -404,8 +423,7 @@ size_t IndexReader::rank_of(const std::string& plain)
     while ((got = std::fread(buf.data(), 8, buf.size(), f_)) > 0)
         for (size_t i = 0; i < got; i++) {
             ++r;
-            const int kl = record_kl(buf[i]);
-            if (vig_decrypt(cipher_, unpack_key(record_code(buf[i]), kl)) == plain) return r;
+            if (vig_decrypt(cipher_, record_key(buf[i], dict_.alphabet.size()), dict_.alphabet.size()) == plain) return r;
         }
     return 0;
 }

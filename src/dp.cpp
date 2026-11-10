@@ -1,4 +1,5 @@
 #include "dp.hpp"
+#include "cipher.hpp"
 #include <algorithm>
 #include <atomic>
 #include <exception>
@@ -31,17 +32,17 @@
 // reach an accepted end and carrying, for each key prefix, the set of states it can be in;
 // so every key comes out exactly once.
 
-uint64_t pack_key(const std::string& key)
+uint64_t pack_key(const std::string& key, int alpha)
 {
     uint64_t code = 0, p = 1;
-    for (char c : key) { code += (uint64_t)(c - 'a') * p; p *= ALPHA; }
+    for (char c : key) { code += (uint64_t)letter_index(c) * p; p *= alpha; }
     return code;
 }
 
-std::string unpack_key(uint64_t code, int key_len)
+std::string unpack_key(uint64_t code, int key_len, int alpha)
 {
     std::string k(key_len, 'a');
-    for (int i = 0; i < key_len; i++) { k[i] = 'a' + code % ALPHA; code /= ALPHA; }
+    for (int i = 0; i < key_len; i++) { k[i] = letter_char((int)(code % alpha)); code /= alpha; }
     return k;
 }
 
@@ -83,6 +84,7 @@ struct Problem {
     const Dictionary&  dict;
     int                n, kl, T;
     std::vector<int>   len;   // letters per track
+    int                A;     // alphabet size
 };
 
 // Successors of one track state after reading letter x (0..2 of them).
@@ -139,7 +141,7 @@ void successors(const Problem& P, const State<M>& s, int j, int key, F&& emit)
     int      cnt[M];
     for (int t = 0; t < P.T; t++) {
         if (j >= P.len[t]) { opt[t][0] = s[t]; cnt[t] = 1; continue; }   // track finished
-        int x = (P.cipher[t * P.kl + j] - 'a' - key + ALPHA) % ALPHA;
+        int x = (letter_index(P.cipher[t * P.kl + j]) - key + P.A) % P.A;
         if ((cnt[t] = advance(P.dict, s[t], x, opt[t])) == 0) return;
     }
     const int last = P.T - 1;
@@ -281,7 +283,7 @@ size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sin
         auto each_successor = [&](auto&& fn) {
             for (size_t i = 0; i < prev.size(); i++) {
                 const State<M> s = prev.at(i, T);
-                for (int k = 0; k < ALPHA; k++) successors<M>(P, s, j, k, fn);
+                for (int k = 0; k < P.A; k++) successors<M>(P, s, j, k, fn);
             }
         };
         Layer<M> next;
@@ -312,7 +314,7 @@ size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sin
         live[j].assign(layers[j].size(), 0);
         parallel_for(layers[j].size(), threads, [&](size_t i){
             const State<M> s = layers[j].at(i, T);
-            for (int k = 0; k < ALPHA && !live[j][i]; k++)
+            for (int k = 0; k < P.A && !live[j][i]; k++)
                 successors<M>(P, s, j, k, [&](const State<M>& o){
                     long x = index(j + 1, o);
                     if (x >= 0 && live[j + 1][x]) live[j][i] = 1;
@@ -321,12 +323,12 @@ size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sin
     }
 
     // Keys: walk key prefixes carrying the set of live states each prefix can be in.
-    // Split by the first key letter into 26 tasks; each hands its keys to the sink in batches.
+    // Split by the first key letter into A tasks; each hands its keys to the sink in batches.
     std::vector<long> start;
     for (size_t i = 0; i < layers[0].size(); i++) if (live[0][i]) start.push_back((long)i);
     if (start.empty()) return 0;
-    uint64_t pow26[13] = {1};
-    for (int i = 1; i <= 12; i++) pow26[i] = pow26[i - 1] * ALPHA;
+    uint64_t powA[13] = {1};
+    for (int i = 1; i <= 12; i++) powA[i] = powA[i - 1] * P.A;
     std::atomic<size_t> found{0};
     std::atomic<bool>   over{false};
     std::function<void(int, const std::vector<long>&, uint64_t, std::vector<uint64_t>&, int)> walk =
@@ -337,7 +339,7 @@ size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sin
             else if (out.size() == SINK_BATCH) { sink(out.data(), out.size()); out.clear(); }
             return;
         }
-        for (int k = 0; k < ALPHA && !over; k++) {
+        for (int k = 0; k < P.A && !over; k++) {
             if (only >= 0 && k != only) continue;
             std::vector<long> nx;
             for (long i : set_j)
@@ -348,10 +350,10 @@ size_t column_dp(const Problem& P, int threads, size_t limit, const KeySink& sin
             if (nx.empty()) continue;
             std::sort(nx.begin(), nx.end());
             nx.erase(std::unique(nx.begin(), nx.end()), nx.end());
-            walk(j + 1, nx, code + (uint64_t)k * pow26[j], out, -1);
+            walk(j + 1, nx, code + (uint64_t)k * powA[j], out, -1);
         }
     };
-    parallel_for(ALPHA, threads, [&](size_t k){
+    parallel_for(P.A, threads, [&](size_t k){
         std::vector<uint64_t> out;
         out.reserve(SINK_BATCH);
         walk(0, start, 0, out, (int)k);
@@ -370,19 +372,19 @@ size_t brute_force(const std::string& cipher, int kl, const Dictionary& d, int t
                    const KeySink& sink, SearchStats* stats)
 {
     uint64_t total = 1;
-    for (int i = 0; i < kl; i++) total *= ALPHA;
+    const int A = d.alphabet.size();
+    for (int i = 0; i < kl; i++) total *= A;
     const int n = (int)cipher.size();
     std::vector<char> ok(total, 0);
     parallel_for(total, threads, [&](size_t code){
-        std::string key = unpack_key(code, kl), plain(n, 'a');
-        for (int i = 0; i < n; i++) plain[i] = 'a' + (cipher[i] - key[i % kl] + ALPHA) % ALPHA;
+        std::string key = unpack_key(code, kl, A), plain = vig_decrypt(cipher, key, A);
         std::vector<char> reach(n + 1, 0);
         reach[0] = 1;
         for (int i = 0; i < n; i++) {
             if (!reach[i]) continue;
             int u = 0;
             for (int e = i; e < n; e++) {
-                if ((u = d.trie.ch[u][plain[e] - 'a']) < 0) break;
+                if ((u = d.trie.ch[u][letter_index(plain[e])]) < 0) break;
                 if (d.trie.mark[u]) reach[e + 1] = 1;
             }
         }
@@ -405,9 +407,9 @@ size_t find_keys(const std::string& cipher, int key_len, const Dictionary& dict,
                  size_t limit, const KeySink& sink, SearchStats* stats)
 {
     const int n = (int)cipher.size();
-    if (key_len <= 4)     // at most 26^4 keys
+    if (key_len <= 4)     // at most 33^4 = 1.2 million keys
         return brute_force(cipher, key_len, dict, threads, limit, sink, stats);
-    Problem P{cipher, dict, n, key_len, (n + key_len - 1) / key_len, {}};
+    Problem P{cipher, dict, n, key_len, (n + key_len - 1) / key_len, {}, dict.alphabet.size()};
     for (int t = 0; t < P.T; t++) P.len.push_back(std::min(key_len, n - t * key_len));
     switch (P.T) {                       // n <= 25 and key_len >= 5: 2..5 tracks
         case 2:  return column_dp<2>(P, threads, limit, sink, stats);

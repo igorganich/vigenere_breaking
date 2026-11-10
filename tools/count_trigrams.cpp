@@ -2,11 +2,10 @@
 //
 //   count_trigrams WORDS MIN_COUNT TRIGRAMS_OUT CONTEXTS_OUT [BIGRAMS_OUT] < corpus.txt
 //
-// The corpus is read line by line (UTF-8), one sentence (or subtitle line) per line.  Letters
-// are lowercased, apostrophes dropped ("don't" -> "dont", as plaintexts are written), German
-// umlauts and ß transliterated as ciphers write them (ä -> ae, ö -> oe, ü -> ue, ß -> ss), and
-// any other character separates words; a word with another non-ASCII letter is outside the
-// list.  Words are those of the WORDS list (2+ letters) plus "a"
+// The corpus is read line by line (UTF-8), one sentence (or subtitle line) per line.  Words
+// are normalized as tools/normalize.hpp describes (lowercase; German umlauts and ß as ae, oe,
+// ue, ss; Ukrainian letters in UTF-8; apostrophes dropped, "don't" -> "dont"), and any other
+// character separates words; a word with another letter is outside the list.  Words are those of the WORDS list (2+ letters) plus "a"
 // and "i".  Trigrams never cross a line or a word outside the list.
 //
 // TRIGRAMS_OUT: "w1 w2 w3 count" for trigrams seen at least MIN_COUNT times, sorted.
@@ -28,6 +27,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "normalize.hpp"
 
 int main(int argc, char** argv)
 {
@@ -61,34 +61,21 @@ int main(int argc, char** argv)
     while (std::getline(std::cin, line)) {
         ids.clear();
         tok.clear();
-        bool foreign = false;      // the current word has a letter outside a-z and the umlauts
+        bool foreign = false;      // the current word has a letter outside the cipher alphabets
+        std::string orig;
         auto flush = [&]{
             if (!tok.empty() || foreign) {
                 auto it = foreign ? id.end() : id.find(tok);
                 ids.push_back(it == id.end() ? -1 : it->second);
             }
             tok.clear();
+            orig.clear();
             foreign = false;
         };
-        for (size_t i = 0; i < line.size(); i++) {
-            const unsigned char ch = (unsigned char)line[i];
-            if (ch >= 'A' && ch <= 'Z') tok += (char)(ch - 'A' + 'a');
-            else if (ch >= 'a' && ch <= 'z') tok += (char)ch;
-            else if (ch == '\'') continue;
-            else if (ch == 0xC3 && i + 1 < line.size()) {
-                const unsigned char d = (unsigned char)line[++i];
-                if      (d == 0xA4 || d == 0x84) tok += "ae";     // ä Ä
-                else if (d == 0xB6 || d == 0x96) tok += "oe";     // ö Ö
-                else if (d == 0xBC || d == 0x9C) tok += "ue";     // ü Ü
-                else if (d == 0x9F)              tok += "ss";     // ß
-                else if ((d >= 0x80 && d <= 0x96) || (d >= 0x98 && d <= 0xB6) || d >= 0xB8) foreign = true;  // other Latin-1 letters
-                else flush();                                     // × ÷
-            }
-            else if (ch >= 0xC4 && ch < 0xF8) {                    // another non-ASCII character: part of a foreign word
-                foreign = true;
-                while (i + 1 < line.size() && ((unsigned char)line[i + 1] & 0xC0) == 0x80) i++;
-            }
-            else flush();
+        for (size_t i = 0; i < line.size(); ) {
+            const norm::Kind k = norm::next(line, i, tok, orig);
+            if (k == norm::Foreign) foreign = true;
+            else if (k == norm::Separator) flush();
         }
         flush();
         tokens += ids.size();

@@ -128,6 +128,13 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
     m.kind = kind;
     m.name = kind == ModelKind::Unigram ? "unigram" : kind == ModelKind::Bigram ? "bigram" : "trigram";
     uint64_t fp = 1469598103934665603ull;
+    // A word of a table (UTF-8 in the dictionary's alphabet) -> its trie node, or -1.
+    std::string scratch;
+    auto node = [&](const std::string& w) {
+        if (!d.alphabet.encode_word(w, &scratch)) return -1;
+        int u = d.trie.find(scratch);
+        return u >= 0 && d.trie.mark[u] ? u : -1;
+    };
 
     // Unigram counts.
     const std::string uni_path = txt_dir + "/unigrams.txt";
@@ -139,8 +146,8 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
         std::string w;
         double c;
         while (in >> w >> c) {
-            int u = d.trie.find(w);
-            if (u >= 0 && d.trie.mark[u]) count[u] = c;
+            int u = node(w);
+            if (u >= 0) count[u] = c;
         }
     }
     // Custom words (Dictionary::extra) that the table lacks get its smallest count, the count
@@ -175,8 +182,8 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
             std::string a, b;
             double c;
             while (in >> a >> b >> c) {
-                int u = d.trie.find(a), v = d.trie.find(b);
-                if (u >= 0 && v >= 0 && d.trie.mark[u] && d.trie.mark[v]) list.push_back({u, v, c});
+                int u = node(a), v = node(b);
+                if (u >= 0 && v >= 0) list.push_back({u, v, c});
             }
         }
         // Per first word: the count the listed pairs take, and the unigram mass of the words
@@ -194,10 +201,6 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
     }
     if (kind == ModelKind::Trigram) {
         if (d.trie.ch.size() >= (1u << 21)) throw std::runtime_error("trie too large for trigram keys");
-        auto node = [&](const std::string& w) {
-            int u = d.trie.find(w);
-            return u >= 0 && d.trie.mark[u] ? u : -1;
-        };
         // Context counts c(w₁ w₂).
         const std::string ctx_path = txt_dir + "/trigram_contexts.txt";
         const std::string ctx_text = read_all(ctx_path);

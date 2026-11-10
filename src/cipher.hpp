@@ -6,13 +6,14 @@
 
 // ── Vigenère primitives ───────────────────────────────────────────────────────
 
-inline char vig_enc(char p, char k) { return 'a' + (p - 'a' + k - 'a') % ALPHA; }
-inline char vig_dec(char c, char k) { return 'a' + (c - k + ALPHA) % ALPHA; }
+// Letters in internal form (tables.hpp); `n` is the alphabet size (26, or 33 for Ukrainian).
+inline char vig_enc(char p, char k, int n) { return letter_char((letter_index(p) + letter_index(k)) % n); }
+inline char vig_dec(char c, char k, int n) { return letter_char((letter_index(c) - letter_index(k) + n) % n); }
 
-inline std::string vig_decrypt(const std::string& cipher, const std::string& key)
+inline std::string vig_decrypt(const std::string& cipher, const std::string& key, int n)
 {
     std::string plain(cipher.size(), 'a');
-    for (size_t i = 0; i < cipher.size(); i++) plain[i] = vig_dec(cipher[i], key[i % key.size()]);
+    for (size_t i = 0; i < cipher.size(); i++) plain[i] = vig_dec(cipher[i], key[i % key.size()], n);
     return plain;
 }
 
@@ -43,7 +44,7 @@ inline double segment_unigram(const Dictionary& d, const LanguageModel& m, const
         if (dp[i] + m.stray_logp > dp[i + 1]) { dp[i + 1] = dp[i] + m.stray_logp; back[i + 1] = 0; }
         int u = 0;
         for (int e = i; e < n; e++) {
-            if ((u = d.trie.ch[u][text[e] - 'a']) < 0) break;
+            if ((u = d.trie.ch[u][letter_index(text[e])]) < 0) break;
             if (d.trie.mark[u] && dp[i] + m.uni[u] > dp[e + 1]) {
                 dp[e + 1] = dp[i] + m.uni[u];
                 back[e + 1] = e + 1 - i;
@@ -81,7 +82,7 @@ inline double segment_bigram(const Dictionary& d, const LanguageModel& m, const 
         first[i] = (int)spans.size();
         int u = 0;
         for (int e = i; e < n; e++) {
-            if ((u = d.trie.ch[u][text[e] - 'a']) < 0) break;
+            if ((u = d.trie.ch[u][letter_index(text[e])]) < 0) break;
             if (d.trie.mark[u]) spans.push_back({i, e + 1, u});
         }
     }
@@ -157,7 +158,7 @@ inline double segment_trigram(const Dictionary& d, const LanguageModel& m, const
         first[i] = (int)spans.size();
         int u = 0;
         for (int e = i; e < n; e++) {
-            if ((u = d.trie.ch[u][text[e] - 'a']) < 0) break;
+            if ((u = d.trie.ch[u][letter_index(text[e])]) < 0) break;
             if (d.trie.mark[u]) spans.push_back({i, e + 1, u});
         }
     }
@@ -252,10 +253,10 @@ inline double segment(const Dictionary& d, const LanguageModel& m, const std::st
 }
 
 // Ranking score of a (key, plaintext) candidate: log P(plaintext) + log P(key).  A key is a
-// priori one of 26^kl strings, so a fluent plaintext from a short key is stronger evidence
+// priori one of A^kl strings (A letters), so a fluent plaintext from a short key is stronger evidence
 // than the same from a long one.
 inline double candidate_score(const Dictionary& d, const LanguageModel& m, const std::string& plain,
                               int key_len, std::string* fmt = nullptr)
 {
-    return segment(d, m, plain, fmt) - key_len * std::log((double)ALPHA);
+    return segment(d, m, plain, fmt) - key_len * std::log((double)d.alphabet.size());
 }

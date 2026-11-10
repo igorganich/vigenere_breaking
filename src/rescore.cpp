@@ -8,6 +8,27 @@
 #include <sstream>
 #include <stdexcept>
 
+namespace {
+
+// `s` with its first letter in capitals: ASCII, Latin-1 (ä, ö, ü -> Ä, Ö, Ü) and Cyrillic
+// (а-я, є, і, ї, ґ -> А-Я, Є, І, Ї, Ґ), all in UTF-8.
+std::string capitalize_first(std::string s)
+{
+    if (s.empty()) return s;
+    unsigned char& a = (unsigned char&)s[0];
+    if (a < 0x80) { a = (unsigned char)std::toupper(a); return s; }
+    if (s.size() < 2) return s;
+    unsigned char& b = (unsigned char&)s[1];
+    if (a == 0xC3 && b >= 0xA0 && b <= 0xBE && b != 0xB7) b -= 0x20;     // à-þ -> À-Þ, not ÷
+    else if (a == 0xD0 && b >= 0xB0 && b <= 0xBF) b -= 0x20;             // а-п -> А-П
+    else if (a == 0xD1 && b >= 0x80 && b <= 0x8F) { a = 0xD0; b += 0x20; }  // р-я -> Р-Я
+    else if (a == 0xD1 && b >= 0x90 && b <= 0x9F) { a = 0xD0; b -= 0x10; }  // ѐ-џ (є, і, ї) -> Ѐ-Џ
+    else if (a == 0xD2 && b == 0x91) b = 0x90;                           // ґ -> Ґ
+    return s;
+}
+
+} // namespace
+
 std::string lm_sentence(const std::string& plain, const std::string& words, const Dictionary* dict)
 {
     // Words from "[w:r][w:r]..."; a split with a stray letter falls back to the plaintext.
@@ -26,15 +47,10 @@ std::string lm_sentence(const std::string& plain, const std::string& words, cons
     for (const auto& w : ws) {
         if (!s.empty()) s += ' ';
         if (dict && dict->display.count(w)) s += dict->display.at(w);
-        else s += english && w == "i" ? "I" : w;
+        else if (english && w == "i") s += "I";
+        else s += dict ? dict->alphabet.decode(w) : w;
     }
-    // A capital first letter; ä, ö, ü (UTF-8 C3 A4/B6/BC) become Ä, Ö, Ü.
-    if ((unsigned char)s[0] == 0xC3 && s.size() > 1 && (unsigned char)s[1] >= 0xA0 && (unsigned char)s[1] <= 0xBE &&
-        (unsigned char)s[1] != 0xB7 && (unsigned char)s[1] != 0xBF)
-        s[1] = (char)((unsigned char)s[1] - 0x20);
-    else
-        s[0] = (char)std::toupper((unsigned char)s[0]);
-    return s + ".";
+    return capitalize_first(s) + ".";
 }
 
 std::vector<Rescored> rescore(IndexReader& idx, const Gpt2& lm, size_t top, int threads)
@@ -45,8 +61,8 @@ std::vector<Rescored> rescore(IndexReader& idx, const Gpt2& lm, size_t top, int 
     const auto lp = lm.logprob(sentences, threads);
     std::vector<Rescored> out;
     for (size_t i = 0; i < cands.size(); i++)
-        out.push_back({cands[i].rank, cands[i].key, sentences[i],
-                       lp[i] - (double)cands[i].key.size() * std::log((double)ALPHA)});
+        out.push_back({cands[i].rank, idx.dict().alphabet.decode(cands[i].key), sentences[i],
+                       lp[i] - (double)cands[i].key.size() * std::log((double)idx.dict().alphabet.size())});
     std::stable_sort(out.begin(), out.end(), [](const Rescored& a, const Rescored& b){
         return a.score != b.score ? a.score > b.score : a.trigram_rank < b.trigram_rank;
     });
@@ -107,8 +123,8 @@ std::vector<Rescored> rescore_ranks(IndexReader& idx, const Gpt2& lm, const std:
         const auto lp = lm.logprob(sentences, threads);
         char buf[64];
         for (size_t j = 0; j < cands.size(); j++) {
-            std::snprintf(buf, sizeof buf, "%.17g", lp[j] - (double)cands[j].key.size() * std::log((double)ALPHA));
-            f << cands[j].rank << '\t' << cands[j].key << '\t' << buf << '\t' << sentences[j] << '\n';
+            std::snprintf(buf, sizeof buf, "%.17g", lp[j] - (double)cands[j].key.size() * std::log((double)idx.dict().alphabet.size()));
+            f << cands[j].rank << '\t' << idx.dict().alphabet.decode(cands[j].key) << '\t' << buf << '\t' << sentences[j] << '\n';
         }
         if (!f.flush()) throw std::runtime_error("error writing " + scores_path);
         progress(done_ranks.size() + std::min(todo.size(), i + batch), total);

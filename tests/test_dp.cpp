@@ -23,10 +23,11 @@ static void check(bool ok, const std::string& what)
     if (!ok) failures++;
 }
 
-static std::string encrypt(const std::string& plain, const std::string& key)
+// Plaintext and key in internal form; `A` letters in the alphabet.
+static std::string encrypt(const std::string& plain, const std::string& key, int A = 26)
 {
     std::string c(plain.size(), 'a');
-    for (size_t i = 0; i < plain.size(); i++) c[i] = vig_enc(plain[i], key[i % key.size()]);
+    for (size_t i = 0; i < plain.size(); i++) c[i] = vig_enc(plain[i], key[i % key.size()], A);
     return c;
 }
 
@@ -45,11 +46,12 @@ static bool splits_into_words(const Dictionary& d, const std::string& text)
 // Reference: every key of length kl whose plaintext splits into words.
 static std::set<uint64_t> brute_force(const Dictionary& d, const std::string& cipher, int kl)
 {
+    const int A = d.alphabet.size();
     uint64_t total = 1;
-    for (int i = 0; i < kl; i++) total *= ALPHA;
+    for (int i = 0; i < kl; i++) total *= A;
     std::vector<char> hit(total, 0);
     parallel_for(total, 0 + (int)sysconf(_SC_NPROCESSORS_ONLN), [&](size_t code){
-        hit[code] = splits_into_words(d, vig_decrypt(cipher, unpack_key(code, kl)));
+        hit[code] = splits_into_words(d, vig_decrypt(cipher, unpack_key(code, kl, A), A));
     });
     std::set<uint64_t> keys;
     for (uint64_t c = 0; c < total; c++) if (hit[c]) keys.insert(c);
@@ -385,6 +387,47 @@ int main()
         bool threw = false;
         try { IndexReader wrong(other, dict, trigram); } catch (const std::exception&) { threw = true; }
         check(threw, "languages: a German index is rejected with the English dictionary");
+        unlink(other.c_str());
+    }
+    {
+        // Ukrainian: 33 letters, Vigenère mod 33.
+        const Alphabet uk = Alphabet::of("абвгґдеєжзиіїйклмнопрстуфхцчшщьюя", "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ");
+        std::string w;
+        check(uk.size() == 33 && uk.letters_of("Я тебе, кохаю!") == uk.letters_of("ятебекохаю") &&
+              uk.decode(uk.letters_of("ЇЖАК ґанок")) == "їжакґанок" &&
+              uk.encode_word("м'ясо", &w) && uk.decode(w) == "мясо" && uk.encode_word("м’ясо", &w) &&
+              !uk.encode_word("мясо1", &w) && uk.letters_of("abc") == "",
+              "ukrainian: alphabet conversion (both cases, apostrophes, foreign letters)");
+        Dictionary ud = load_dictionary("txt/uk/words.txt", {},
+                                        {{"і", 1}, {"в", 2}, {"з", 4}, {"у", 6}, {"а", 9}, {"я", 15}, {"є", 18}, {"й", 34}, {"о", 120}}, uk);
+        ud.lang = "uk";
+        load_display(ud, "txt/uk/display.txt");
+        const std::string plain = uk.letters_of("ятебекохаю");
+        bool same = true;
+        for (int kl = 2; kl <= 5 && same; kl++) {     // 2-4: brute-force path, 5: column DP
+            const std::string cipher = encrypt(plain, uk.letters_of("ключик").substr(0, kl), 33);
+            const auto got = find_keys(cipher, kl, ud, threads, SIZE_MAX);
+            same = std::set<uint64_t>(got.begin(), got.end()) == brute_force(ud, cipher, kl) && !got.empty();
+        }
+        check(same, "ukrainian: search equals brute force over all 33^kl keys (key lengths 2-5, both search paths)");
+        check(lm_sentence(plain, "[" + uk.letters_of("я") + ":15][" + uk.letters_of("тебе") + ":235][" + uk.letters_of("кохаю") + ":9]", &ud) ==
+                  "Я тебе кохаю." &&
+              lm_sentence(uk.letters_of("мясо"), "[" + uk.letters_of("мясо") + ":900]", &ud) == "М'ясо.",
+              "ukrainian: GPT-2 reads a capital Cyrillic letter and apostrophes (м'ясо)");
+        const LanguageModel uk_tri = load_model(ModelKind::Trigram, ud, "txt/uk");
+        const std::string other = path + ".uk_test";
+        IndexOptions opt;
+        opt.max_key_length = 5;
+        build_index(encrypt(plain, uk.letters_of("ключ"), 33), ud, uk_tri, opt, other);
+        size_t rank = 0;
+        std::string key;
+        {
+            IndexReader idx(other, ud, uk_tri);
+            rank = idx.rank_of(plain);
+            if (rank) key = uk.decode(idx.range(rank, rank).at(0).key);
+        }
+        check(rank == 1 && key == "ключ" && index_lang(other) == "uk",
+              "ukrainian: index finds я тебе кохаю / ключ first (33-letter records) and records lang uk");
         unlink(other.c_str());
     }
     unlink(path.c_str());

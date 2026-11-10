@@ -11,14 +11,14 @@
 // sentences ("I am told to go and see it by four.", from the trigram's word split) and
 // ranks them by
 //
-//     score = log P_GPT-2(sentence) − key_length · ln 26
+//     score = log P_GPT-2(sentence) − key_length · ln A      (A letters in the alphabet)
 //
 // with ties broken by trigram rank.  The result is a shortlist stored next to the index
 // in <index>.lm; the index itself keeps the trigram order.
 
 struct Rescored {
     size_t      trigram_rank = 0;
-    std::string key, sentence;
+    std::string key, sentence;            // as text (UTF-8)
     double      score = 0;
 };
 

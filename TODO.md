@@ -49,13 +49,14 @@ The word file would take an optional count per line (`github 1500000`), and a co
 fill the counts in with 1-2. An existing index is then updated with `rerank` (about a
 minute, no new search) and `rescore` (GPT-2 on the new shortlist).
 
-## Ukrainian
+## More languages, and benchmarks for them
 
-Ukrainian plaintexts use their own 33-letter alphabet (Vigenère mod 33), so the alphabet
-becomes a per-language setting: the trie's child arrays, the key letters the search tries,
-key packing (33^12 does not fit the index record's 58 bits for the key), UTF-8 input and
-output, and capitalization in GPT-2's sentences. Data as for German: a subtitle corpus, a
-spelling list, and a Ukrainian GPT-2 of the same shape.
+German and Ukrainian are tested on a few known plaintexts only; `bench/realistic.py` has
+English phrases. A phrase set per language would measure their ranking as for English.
+Ukrainian readings grow fast with the key length (85 million at key length 10 on a
+19-letter text, against 2.4 million up to key length 9): its nine 1-letter words fit almost
+anywhere. Fewer or rarer short words, or a check that 1-letter words are not adjacent, would
+cut that; both change what the search can find, so they need measuring first.
 
 ## Faster index building
 

@@ -1,6 +1,6 @@
 # Vigenère Cipher Breaker
 
-A C++ tool that breaks **ultra-short** Vigenère ciphertexts (2–25 letters) without knowing the key, in English or German plaintext. It works in three stages:
+A C++ tool that breaks **ultra-short** Vigenère ciphertexts (2–25 letters) without knowing the key, in English, German or Ukrainian plaintext. It works in three stages:
 
 1. **Search.** For every key length from 1 to 12 it finds **every** key whose plaintext splits completely into dictionary words. The search is exhaustive, so the true plaintext is always among the candidates, as long as its words are in the dictionary and its key length was not skipped.
 2. **Rank.** It scores every candidate (tens to hundreds of millions) with a word-trigram language model and stores them, best first, in an index file you can query by rank: the best 10, the millionth, or any range.
@@ -55,8 +55,8 @@ Classic attacks (index of coincidence, frequency analysis, n-gram hill-climbing)
 
 - Ciphertext of **2–25 letters** (non-letters are stripped; longer input is rejected).
 - Key length **1–12**.
-- The plaintext is **English or German** (`--lang`, [§5.5](#55-languages)), written in the 26 letters a–z.
-- The plaintext consists **entirely of dictionary words**: for English the bundled word list of 81,381 words plus "a" and "i", for German 66,222 words ([§10](#10-data-sources)), and any custom words given with `--words`, written without spaces or punctuation ("dont", not "don't"). A plaintext containing a word outside the list is not found (see [§8](#8-limitations)).
+- The plaintext is **English, German or Ukrainian** (`--lang`, [§5.5](#55-languages)): English and German in the 26 letters a–z, Ukrainian in its own 33 letters (Vigenère mod 33).
+- The plaintext consists **entirely of dictionary words**: for English the bundled word list of 81,381 words plus "a" and "i", for German 66,222 words, for Ukrainian 148,630 words plus 9 of one letter ([§10](#10-data-sources)), and any custom words given with `--words`, written without spaces or punctuation ("dont", not "don't"). A plaintext containing a word outside the list is not found (see [§8](#8-limitations)).
 
 ---
 
@@ -187,7 +187,7 @@ GPT-2 moves "money talks" from 11th to first and "the coffee is too hot" from 4t
 
 - GCC or Clang with C++17 support
 - Python 3 (benchmarks and table generation only)
-- About 550 MB of disk and 0.8 GB of memory for GPT-2 (optional; about 510 MB more for the German one)
+- About 550 MB of disk and 0.8 GB of memory for GPT-2 (optional; about 510 MB more for the German one, 670 MB for the Ukrainian one)
 
 ### 5.2 Building
 
@@ -197,6 +197,7 @@ make test     # unit tests + end-to-end tests
 make clean
 bash tools/get_gpt2.sh   # GPT-2 for stage 3 → models/gpt2/ (optional, about 550 MB)
 bash tools/get_gpt2.sh de   # German GPT-2 → models/gpt2-de/ (optional, about 510 MB)
+bash tools/get_gpt2.sh uk   # Ukrainian GPT-2 → models/gpt2-uk/ (optional, about 670 MB)
 ```
 
 The repository holds no binary: build it on the machine that runs it. The build uses `-march=native`, so the binary is tuned to that CPU and may not run on another one; rebuild there instead of copying it. The binary finds the word lists and model tables in `txt/<language>/` next to its own `bin/` directory, whatever the working directory.
@@ -224,8 +225,8 @@ bin/vigenere crack cipher.txt run.idx [options]
 --model M           ranking model: trigram (default), bigram or unigram
 --lm-top K          rescore the best K with GPT-2 (default 20000)
 --no-lm             skip GPT-2 and print the trigram ranking
---lang L            plaintext language: en (default) or de (German); later
-                    commands read it from the index
+--lang L            plaintext language: en (default), de (German) or uk
+                    (Ukrainian); later commands read it from the index
 --words FILE        add the words of FILE to the dictionary (one or more per line,
                     '#' starts a comment); saved next to the index as <index>.words
 --threads N         worker threads (default: all)
@@ -261,7 +262,20 @@ GPT-2 reads each word in its real spelling, kept in `txt/de/display.txt` from th
 
 The same ciphertext has far fewer German readings than English ones: German words are longer and its short words are few (24 of 2 letters, 142 of 3), so a 25-letter German text with an 8-letter key has thousands of candidates where an English reading of it has over a hundred million. A language is chosen up front; to try both, crack twice into two indexes.
 
-Adding a language takes a word list, its count tables and, optionally, a display file and a GPT-2 of the same shape; `src/lang.hpp` lists the languages. The German data was built by `tools/count_words.cpp`, `tools/make_word_list_de.py` and `tools/count_trigrams.cpp` ([§10](#10-data-sources)).
+`--lang uk` cracks Ukrainian plaintexts, enciphered over the 33-letter Ukrainian alphabet (а б в г ґ д е є ж з и і ї й к л м н о п р с т у ф х ц ч ш щ ь ю я): ciphertexts, keys and plaintexts are Cyrillic, upper or lower case, and apostrophes are dropped as in English ("м'ясо" is `мясо`). Encrypt with `-e plain.txt --lang uk`. GPT-2 reads the words with their capital letters and apostrophes restored (`txt/uk/display.txt`), for the Ukrainian GPT-2 ([benjamin/gpt2-wechsel-ukrainian](https://huggingface.co/benjamin/gpt2-wechsel-ukrainian), GPT-2 small transferred to Ukrainian; `tools/get_gpt2.sh uk`):
+
+```
+$ echo україна | bin/vigenere -e plain.txt --lang uk      # plain.txt: "сьогодні гарна погода"
+іідгьтнбнррщнпжнддї
+$ bin/vigenere crack cipher.txt run.idx --lang uk --max-key-length 9
+...
+         1  key україна       Сьогодні гарна погода.                        trigram #1        score -52.18
+         2  key окраїнн       Цього дам гарна в угода.                      trigram #2        score -85.89
+```
+
+Ukrainian has more readings than German: its nine 1-letter words (і, в, з, у, а, я, є, й, о) and many inflected forms fit almost any short stretch. The 19-letter text above has 2.4 million candidates up to key length 9 (3.5 minutes with GPT-2), but 85 million at key length 10 alone, so on short texts long key lengths can need `--max-candidates` and a lot of disk. Internally a letter is the byte `'a' + i` for letter `i` of the alphabet; text is converted at input and output.
+
+Adding a language takes an alphabet, a word list, its count tables and, optionally, a display file and a GPT-2 of the same shape; `src/lang.hpp` lists the languages. The German and Ukrainian data were built by `tools/count_words.cpp`, `tools/make_word_list_de.py` / `make_word_list_uk.py` and `tools/count_trigrams.cpp` ([§10](#10-data-sources)).
 
 ### 5.6 Reading the index
 
@@ -304,8 +318,8 @@ Rescores any chosen candidates instead: those at the trigram ranks listed in `ra
 
 A 4096-byte text header, then one 8-byte record per candidate, sorted by score (rank 1 first). Rank `r` is at byte `4096 + 8·(r − 1)`.
 
-- **Header** (text lines): `VIGIDX 1`, the ciphertext, the language (`lang de`; indexes without the line are English), a fingerprint of the word list, the ranking model and a fingerprint of its tables, the maximum key length, the candidate count, the count per key length, and notes for skipped key lengths. An index can only be read with the word list it was built with and the model tables it was ranked with; `rerank` brings it up to date.
-- **Record:** the key length in the top 6 bits and the key packed base 26 below. Plaintext, word split and score are recomputed from the key when read.
+- **Header** (text lines): `VIGIDX 1`, the ciphertext (as text, UTF-8), the language (`lang de`; indexes without the line are English), a fingerprint of the word list, the ranking model and a fingerprint of its tables, the maximum key length, the candidate count, the count per key length, and notes for skipped key lengths. An index can only be read with the word list it was built with and the model tables it was ranked with; `rerank` brings it up to date.
+- **Record:** for 26-letter languages the key length in the top 6 bits and the key packed base 26 below; for Ukrainian (33¹² does not fit in 58 bits) the key as one number in bijective base 34, Σ (letter + 1) · 34ⁱ, whose digit count is the key length. Plaintext, word split and score are recomputed from the key when read.
 - **Older indexes** have no model line; they were ranked by the removed Zipf model. `show` rejects them; `rerank` converts them.
 - **Custom words** (`<index>.words`, text): the words added with `--words`, one per line. Every command reads them with the index; without them the index is rejected as built with a different dictionary.
 - **GPT-2 shortlist** (`<index>.lm`, text): a header naming the ciphertext, candidate count and ranking model of its index (`show --lm` refuses a shortlist that no longer matches), then one line per candidate, best first: trigram rank, key, score, sentence.
@@ -337,7 +351,7 @@ True-plaintext ranks are the trigram's; times are for the search and the trigram
 
 ## 8. Limitations
 
-- **Dictionary coverage.** Every word of the plaintext must be in the language's word list (`txt/en/words.txt`, `txt/de/words.txt`) or a `--words` file. The German list holds words seen at least 20 times in German subtitles, so rare compounds are missing. The list covers more than one might expect ("dont", "london", "email", "smartphone", "wifi") but misses, for example, "usa" and "covid", and of 2–3-letter words it has only the 631 of the original list, on purpose: the short words other lists add are mostly abbreviations ("pm", "cd", "ltd"), and each multiplies the readings of every ciphertext.
+- **Dictionary coverage.** Every word of the plaintext must be in the language's word list (`txt/en/words.txt`, `txt/de/words.txt`, `txt/uk/words.txt`) or a `--words` file. The German list holds words seen at least 20 times in German subtitles, so rare compounds are missing; the Ukrainian one words seen at least 20 times in 131 million words of subtitles, talks and web text. The list covers more than one might expect ("dont", "london", "email", "smartphone", "wifi") but misses, for example, "usa" and "covid", and of 2–3-letter words it has only the 631 of the original list, on purpose: the short words other lists add are mostly abbreviations ("pm", "cd", "ltd"), and each multiplies the readings of every ciphertext.
 - **Ambiguity.** When the text is short relative to the key, enormous numbers of word sequences fit, and no search can tell them apart: 25 letters with key length 12 give 48 million candidates, 22 letters with key length 12 nearly 600 million. Below about 1.5 × the key length (e.g. 13 letters with key length 10) a ciphertext has no unique reading, and such key lengths can exceed even the default limit of a billion candidates. Only the ranking can choose.
 - **Ranking.** With GPT-2, the remaining mistakes are between readings that are all good English: "take the last train" (key `important`) is 3rd behind "Take the fast train." (key `importatt`). Only the key could tell them apart, and the tool treats every key as random letters. Without GPT-2, the trigram model fails mainly on texts that are short for their key: "money talks" (10 letters, key length 6) is 11th behind "as that mean", and the stress case 17th (9th with the 44k-word list, behind "a jury us coupe frog the autumn").
 - **GPT-2's shortlist** holds the trigram's best 20,000. A true plaintext the trigram model ranks lower is not rescored; `rescore --top` widens the shortlist (about 5–10 s per 1,000), and `rescore --ranks` rescores any chosen candidates.
@@ -364,8 +378,9 @@ python3 bench/realistic.py   # real short phrases → bench/realistic-{trigram,g
   - building on disk: tiny sort chunks force sorted runs and a merge and must give the same file byte for byte, a key length over the limit leaves nothing behind, no temporary files remain;
   - the GPT-2 stage: the sentences it reads, the shortlist file (round trip, rejected once its index is re-ranked);
   - languages: 1-letter words per language, German spellings in GPT-2's sentences (schön, a capital Ü), a German index that finds its plaintext, records its language and is rejected with the English dictionary;
+  - Ukrainian: the alphabet's conversions (both cases, apostrophes, foreign letters), the search against a brute force over all 33^kl keys for key lengths 2–5 (both search paths), a capital Cyrillic letter and apostrophes in GPT-2's sentences, a 33-letter index that finds я тебе кохаю with key ключ first;
   - GPT-2 itself (skipped without `models/gpt2`): token ids and log-probabilities of seven sentences against the reference implementation, the same values bit for bit with 1 or 20 threads, alone or in a batch, and over several batches.
-- **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–9 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts, and (with `models/gpt2`) the GPT-2 stage: "money talks" with key `merely`, 11th by trigram, must come first, rescoring chosen ranks must resume without repeating any, and re-ranking must drop the stale shortlist. Custom words: a plaintext with a made-up word is found only with `--words`, the word list is saved next to the index, and the index is rejected without it. German: `dashausistschoen` with key `abc` is found first with `--lang de`, the index records the language, and (with `models/gpt2-de`) the German GPT-2 reads "Das Haus ist schön." first. The suite uses `--max-candidates 150000000 --no-lm` except in the GPT-2 tests, stops texts over 16 letters at key length 10 to stay short (the stress script covers the full range), and caps its own memory at 10 GB.
+- **End-to-end tests** (`tests/run_tests.sh`, about 30 minutes): 18 known plaintexts with key lengths 1–9 are encrypted with the tool, cracked, and must be found; the rank of each is printed (most are rank 1). Three plaintexts whose key is nearly as long as the text (13 letters with key length 10, 14 with 11, 15 with 12) must instead have that key length skipped as too ambiguous. Also command-line errors and repeating ciphertexts, and (with `models/gpt2`) the GPT-2 stage: "money talks" with key `merely`, 11th by trigram, must come first, rescoring chosen ranks must resume without repeating any, and re-ranking must drop the stale shortlist. Custom words: a plaintext with a made-up word is found only with `--words`, the word list is saved next to the index, and the index is rejected without it. German: `dashausistschoen` with key `abc` is found first with `--lang de`, the index records the language, and (with `models/gpt2-de`) the German GPT-2 reads "Das Haus ist schön." first. Ukrainian: `-e --lang uk` encrypts mod 33, я тебе кохаю with key ключ is found first with its key, and (with `models/gpt2-uk`) the Ukrainian GPT-2 reads "Я тебе кохаю." first. The suite uses `--max-candidates 150000000 --no-lm` except in the GPT-2 tests, stops texts over 16 letters at key length 10 to stay short (the stress script covers the full range), and caps its own memory at 10 GB.
 - **Search benchmark** (`bench/bench.py`): plaintexts from common words (8–24 letters) with random keys (2–12 letters); records the rank of the true plaintext, the candidate count and the time. These plaintexts are word salad, so this benchmark measures the search, not the ranking.
 - **Ranking benchmark** (`bench/realistic.py`): 105 real short phrases (`bench/phrases.txt`: messages, instructions, sayings, plain sentences; 9–23 letters), each with one key, alternately a common English word or random letters, of length 2 to 0.6 × the text length. Reports found / top-1 / top-10 / top-100 / top-1000, mean reciprocal rank and median rank, overall, by key type and by text length, and lists every plaintext ranked below 10 next to the reading ranked first. Each search is cached in `bench/cache/` and re-ranked by every model in `--models` (`unigram`, `bigram`, `trigram`, and `gpt2` for GPT-2 on the trigram's best `--lm-top`, 1,000 in the benchmark; default `trigram,gpt2`), so models are compared on the same candidates; `--summary` adds a side-by-side list of the phrases where they disagree, and `--cached-only` measures a new model without searching again.
 
@@ -416,3 +431,17 @@ python3 bench/realistic.py   # real short phrases → bench/realistic-{trigram,g
   zcat de.txt.gz | ./count_trigrams txt/de/words.txt 15 txt/de/trigrams.txt txt/de/trigram_contexts.txt txt/de/bigrams.txt
   ```
 - **German GPT-2:** [dbmdz/german-gpt2](https://huggingface.co/dbmdz/german-gpt2) (Bavarian State Library MDZ Digital Library team; MIT licence), revision `0579faa`, downloaded by `tools/get_gpt2.sh de`. Its scores match the reference implementation to within 0.0002 nats per sentence, as for the English model.
+
+### Ukrainian
+
+- **Corpora:** the Ukrainian monolingual corpora of OPUS: [OpenSubtitles v2018](https://opus.nlpl.eu/OpenSubtitles/corpus/version/OpenSubtitles) (5.9 million words), TED2020 and QED (talks and educational videos), and the first 400 MB (compressed; about 120 million words) of [CCMatrix](https://opus.nlpl.eu/CCMatrix/corpus/version/CCMatrix) (web text): 131 million words. Every count below comes from them.
+- **Word list** (`txt/uk/words.txt`, `unigrams.txt`, `display.txt`): 148,630 words that occur in the corpora and in the Ukrainian spelling list of Debian's `wukrainian` package (version 1.8.0, GPL-2 or LGPL-2; the word list is a selection from it): words of 4+ letters seen at least 20 times, 185 words of 3 letters seen at least 2,000 times and written lowercase (no abbreviations such as США, no names), 39 hand-picked words of 2 letters, "віженер" and "віженера"; the 1-letter words are set in `src/lang.hpp`. Built by `tools/count_words.cpp` and `tools/make_word_list_uk.py`:
+  ```bash
+  for c in OpenSubtitles/v2018 TED2020/v1 QED/v2.0a; do curl -O https://object.pouta.csc.fi/OPUS-$c/mono/uk.txt.gz; done   # one name each
+  curl -r 0-399999999 https://object.pouta.csc.fi/OPUS-CCMatrix/v1/mono/uk.txt.gz -o ccm.txt.gz
+  (zcat subtitles.txt.gz ted.txt.gz qed.txt.gz; zcat ccm.txt.gz 2>/dev/null) | ./count_words 5 > uk_counts.txt
+  apt-get download wukrainian                        # then dpkg-deb -x; usr/share/dict/ukrainian
+  python3 tools/make_word_list_uk.py uk_counts.txt ukrainian
+  ```
+- **Word pairs and triples** (`txt/uk/bigrams.txt`, `trigrams.txt`, `trigram_contexts.txt`): those seen at least 10 times in the same corpora (970,924 pairs, 437,107 triples; the cutoff is lower than for English and German because inflection spreads the counts), counted by `tools/count_trigrams.cpp`.
+- **Ukrainian GPT-2:** [benjamin/gpt2-wechsel-ukrainian](https://huggingface.co/benjamin/gpt2-wechsel-ukrainian) (B. Minixhofer et al., 2022, *WECHSEL: Effective initialization of subword embeddings for cross-lingual transfer of monolingual language models*; MIT licence), revision `fac65ca`, downloaded by `tools/get_gpt2.sh uk`. Its scores match the reference implementation to within 0.0001 nats per sentence. It was chosen over [malteos/gpt2-uk](https://huggingface.co/malteos/gpt2-uk), which scores words with an apostrophe ("м'ясо") as if they were garbage.

@@ -139,6 +139,31 @@ else
     echo "SKIP  German GPT-2 test: models/gpt2-de not found (run tools/get_gpt2.sh de)"
 fi
 
+# ── Ukrainian (--lang uk, 33 letters) ─────────────────────────────────────────
+# "я тебе кохаю" ("I love you") with the key "ключ".
+printf 'я тебе кохаю' > "$WORK/plain.txt"
+echo ключ | "$BIN" -e "$WORK/plain.txt" --lang uk 2>/dev/null > "$WORK/cipher.txt"
+if [[ $(cat "$WORK/cipher.txt") == "йґґшрщмпкй" ]]; then pass "Ukrainian: encryption mod 33 (я тебе кохаю / ключ -> йґґшрщмпкй)"
+else                                                    fail "Ukrainian: encryption gave $(cat "$WORK/cipher.txt")"
+fi
+"$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --lang uk --top 0 --max-key-length 6 --no-lm 2>/dev/null
+line=$("$BIN" show "$WORK/run.idx" --rank-of "Я тебе кохаю")
+first=$("$BIN" show "$WORK/run.idx" --first 1)
+if [[ $line == *": rank 1 of"* && $first == *"key ключ"* ]] && head -c 200 "$WORK/run.idx" | grep -q "^lang uk$"; then
+    pass "Ukrainian: found first with its key (${line#*: }), language recorded in the index"
+else
+    fail "Ukrainian: $line / $first"
+fi
+if [[ -f "$(dirname "$BIN")/../models/gpt2-uk/model.safetensors" ]]; then
+    best=$("$BIN" rescore "$WORK/run.idx" --top 100 --print 1 2>/dev/null)
+    if [[ $best == *"key ключ"*"Я тебе кохаю."* ]]; then pass "Ukrainian: GPT-2 reads \"Я тебе кохаю.\" first"
+    else                                                 fail "Ukrainian: GPT-2 first: $best"
+    fi
+    rm -f "$WORK/run.idx.lm"
+else
+    echo "SKIP  Ukrainian GPT-2 test: models/gpt2-uk not found (run tools/get_gpt2.sh uk)"
+fi
+
 # ── GPT-2 stage (needs models/gpt2, from tools/get_gpt2.sh) ─────────────────────
 # "money talks" with key "merely": the trigram model ranks it 11th, GPT-2 first.
 if [[ -f "$(dirname "$BIN")/../models/gpt2/model.safetensors" ]]; then
