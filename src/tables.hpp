@@ -51,18 +51,20 @@ struct Trie {
 
 // Word list with frequency ranks and the two tries the search walks.
 struct Dictionary {
-    std::unordered_set<std::string>     words;     // 2+ letters from the list, plus "a" and "i"
+    std::unordered_set<std::string>     words;     // 2+ letters from the list, plus the language's 1-letter words
     std::unordered_map<std::string,int> rank;      // word -> 1-based frequency rank
     Trie                                trie;      // all words
     Trie                                suffixes;  // all proper word suffixes (word[i:], i >= 1)
     std::vector<int>                    node_rank; // trie node -> word rank (word ends)
     std::vector<std::string>            extra;     // words added from a custom file, in its order
+    std::unordered_map<std::string,std::string> display;  // word -> spelling for GPT-2 (load_display)
+    std::string                         lang = "en";      // language code (lang.hpp), recorded in indexes
     uint64_t                            fingerprint = 1469598103934665603ull;  // FNV-1a of the file(s)
 };
 
 // Words of a custom word file: one or more per line, '#' starts a comment; letters are
-// lowercased and anything else separates words.  Single letters are skipped (the dictionary
-// has only "a" and "i").  Throws std::runtime_error if the file cannot be read.
+// lowercased and anything else separates words.  Single letters are skipped (1-letter words
+// are fixed per language).  Throws std::runtime_error if the file cannot be read.
 inline std::vector<std::string> read_word_file(const std::string& path)
 {
     std::ifstream f(path);
@@ -85,7 +87,10 @@ inline std::vector<std::string> read_word_file(const std::string& path)
 // Ranks are only shown next to words; probabilities come from the language model (model.hpp).
 // `extra` adds custom words (read_word_file) after the list, ranked after its last word; they
 // change the fingerprint, so an index built with them is only read with the same words.
-inline Dictionary load_dictionary(const std::string& path, const std::vector<std::string>& extra = {})
+// `singles` are the language's 1-letter words with their approximate ranks (English "a" and
+// "i"; lang.hpp), which the list itself leaves out.
+inline Dictionary load_dictionary(const std::string& path, const std::vector<std::string>& extra = {},
+                                  const std::vector<std::pair<std::string, int>>& singles = {{"a", 5}, {"i", 11}})
 {
     std::ifstream f(path);
     if (!f) throw std::runtime_error("cannot open " + path);
@@ -105,8 +110,7 @@ inline Dictionary load_dictionary(const std::string& path, const std::vector<std
         d.fingerprint ^= '\n'; d.fingerprint *= 1099511628211ull;
         d.words.insert(x); d.rank[x] = r++; d.extra.push_back(x);
     }
-    // The list has no 1-letter words; add "a" and "i" at their approximate English ranks.
-    for (auto [word, rk] : {std::pair<const char*, int>{"a", 5}, {"i", 11}})
+    for (const auto& [word, rk] : singles)
         if (d.words.insert(word).second) d.rank[word] = rk;
 
     for (const auto& x : d.words) {
@@ -119,4 +123,13 @@ inline Dictionary load_dictionary(const std::string& path, const std::vector<std
         d.node_rank[u] = rk;
     }
     return d;
+}
+
+// Spellings for GPT-2 from a "word Spelling" file (lang.hpp); a missing file leaves none.
+inline void load_display(Dictionary& d, const std::string& path)
+{
+    std::ifstream f(path);
+    std::string w, spelling;
+    while (f >> w >> spelling)
+        if (d.words.count(w)) d.display[w] = spelling;
 }

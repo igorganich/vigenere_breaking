@@ -118,6 +118,27 @@ fi
 rm -f "$WORK/saved.words"
 rm -f "$WORK/words.txt"
 
+# ── German (--lang de) ────────────────────────────────────────────────────────
+# "das haus ist schön", written dashausistschoen as German ciphers write umlauts.
+printf 'dashausistschoen' > "$WORK/plain.txt"
+echo abc | "$BIN" -e "$WORK/plain.txt" 2>/dev/null > "$WORK/cipher.txt"
+"$BIN" crack "$WORK/cipher.txt" "$WORK/run.idx" --lang de --top 0 --max-key-length 6 --no-lm 2>/dev/null
+line=$("$BIN" show "$WORK/run.idx" --rank-of dashausistschoen)
+if [[ $line == *": rank 1 of"* ]] && head -c 200 "$WORK/run.idx" | grep -q "^lang de$"; then
+    pass "German: found first (${line#*: }), language recorded in the index"
+else
+    fail "German: $line"
+fi
+if [[ -f "$(dirname "$BIN")/../models/gpt2-de/model.safetensors" ]]; then
+    best=$("$BIN" rescore "$WORK/run.idx" --top 100 --print 1 2>/dev/null)
+    if [[ $best == *"key abc"*"Das Haus ist schön."* ]]; then pass "German: GPT-2 reads \"Das Haus ist schön.\" first"
+    else                                                      fail "German: GPT-2 first: $best"
+    fi
+    rm -f "$WORK/run.idx.lm"
+else
+    echo "SKIP  German GPT-2 test: models/gpt2-de not found (run tools/get_gpt2.sh de)"
+fi
+
 # ── GPT-2 stage (needs models/gpt2, from tools/get_gpt2.sh) ─────────────────────
 # "money talks" with key "merely": the trigram model ranks it 11th, GPT-2 first.
 if [[ -f "$(dirname "$BIN")/../models/gpt2/model.safetensors" ]]; then

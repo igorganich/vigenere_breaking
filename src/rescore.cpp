@@ -8,7 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 
-std::string lm_sentence(const std::string& plain, const std::string& words)
+std::string lm_sentence(const std::string& plain, const std::string& words, const Dictionary* dict)
 {
     // Words from "[w:r][w:r]..."; a split with a stray letter falls back to the plaintext.
     std::vector<std::string> ws;
@@ -21,12 +21,19 @@ std::string lm_sentence(const std::string& plain, const std::string& words)
         i = close + 1;
     }
     if (stray || ws.empty()) ws = {plain};
+    const bool english = !dict || dict->lang == "en";
     std::string s;
     for (const auto& w : ws) {
         if (!s.empty()) s += ' ';
-        s += w == "i" ? "I" : w;
+        if (dict && dict->display.count(w)) s += dict->display.at(w);
+        else s += english && w == "i" ? "I" : w;
     }
-    s[0] = (char)std::toupper((unsigned char)s[0]);
+    // A capital first letter; ä, ö, ü (UTF-8 C3 A4/B6/BC) become Ä, Ö, Ü.
+    if ((unsigned char)s[0] == 0xC3 && s.size() > 1 && (unsigned char)s[1] >= 0xA0 && (unsigned char)s[1] <= 0xBE &&
+        (unsigned char)s[1] != 0xB7 && (unsigned char)s[1] != 0xBF)
+        s[1] = (char)((unsigned char)s[1] - 0x20);
+    else
+        s[0] = (char)std::toupper((unsigned char)s[0]);
     return s + ".";
 }
 
@@ -34,7 +41,7 @@ std::vector<Rescored> rescore(IndexReader& idx, const Gpt2& lm, size_t top, int 
 {
     const auto cands = idx.range(1, top);
     std::vector<std::string> sentences;
-    for (const auto& c : cands) sentences.push_back(lm_sentence(c.plain, c.words));
+    for (const auto& c : cands) sentences.push_back(lm_sentence(c.plain, c.words, &idx.dict()));
     const auto lp = lm.logprob(sentences, threads);
     std::vector<Rescored> out;
     for (size_t i = 0; i < cands.size(); i++)
@@ -95,7 +102,7 @@ std::vector<Rescored> rescore_ranks(IndexReader& idx, const Gpt2& lm, const std:
         std::vector<std::string> sentences;
         for (size_t j = i; j < std::min(todo.size(), i + batch); j++) {
             cands.push_back(idx.range(todo[j], todo[j]).at(0));
-            sentences.push_back(lm_sentence(cands.back().plain, cands.back().words));
+            sentences.push_back(lm_sentence(cands.back().plain, cands.back().words, &idx.dict()));
         }
         const auto lp = lm.logprob(sentences, threads);
         char buf[64];

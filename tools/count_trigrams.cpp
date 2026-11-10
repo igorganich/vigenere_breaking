@@ -1,10 +1,12 @@
-// Count word trigrams in a text corpus for the trigram ranking model.
+// Count word trigrams (and optionally word pairs) in a text corpus for the ranking models.
 //
-//   count_trigrams WORDS MIN_COUNT TRIGRAMS_OUT CONTEXTS_OUT < corpus.txt
+//   count_trigrams WORDS MIN_COUNT TRIGRAMS_OUT CONTEXTS_OUT [BIGRAMS_OUT] < corpus.txt
 //
-// The corpus is read line by line, one sentence (or subtitle line) per line.  Letters are
-// lowercased, apostrophes dropped ("don't" -> "dont", as plaintexts are written), and any
-// other character separates words.  Words are those of the WORDS list (2+ letters) plus "a"
+// The corpus is read line by line (UTF-8), one sentence (or subtitle line) per line.  Letters
+// are lowercased, apostrophes dropped ("don't" -> "dont", as plaintexts are written), German
+// umlauts and ß transliterated as ciphers write them (ä -> ae, ö -> oe, ü -> ue, ß -> ss), and
+// any other character separates words; a word with another non-ASCII letter is outside the
+// list.  Words are those of the WORDS list (2+ letters) plus "a"
 // and "i".  Trigrams never cross a line or a word outside the list.
 //
 // TRIGRAMS_OUT: "w1 w2 w3 count" for trigrams seen at least MIN_COUNT times, sorted.
@@ -13,6 +15,8 @@
 //               the trigrams below MIN_COUNT and those into unlisted words are included.
 // The first line of TRIGRAMS_OUT is "# discount D" with D = n1 / (n1 + 2 n2) over all
 // trigrams (n_k: trigrams seen exactly k times), the absolute discount the model uses.
+// BIGRAMS_OUT: "w1 w2 count" for pairs seen at least MIN_COUNT times, sorted (for languages
+//              without web pair counts; English uses Norvig's, tools/make_ngram_tables.py).
 //
 // Build: g++ -O2 -std=c++17 -o count_trigrams tools/count_trigrams.cpp
 
@@ -27,7 +31,11 @@
 
 int main(int argc, char** argv)
 {
-    if (argc != 5) { std::cerr << "usage: count_trigrams WORDS MIN_COUNT TRIGRAMS_OUT CONTEXTS_OUT < corpus\n"; return 1; }
+    if (argc != 5 && argc != 6) {
+        std::cerr << "usage: count_trigrams WORDS MIN_COUNT TRIGRAMS_OUT CONTEXTS_OUT [BIGRAMS_OUT] < corpus\n";
+        return 1;
+    }
+    const bool want_pairs = argc == 6;
     std::vector<std::string> words;
     std::unordered_map<std::string, int> id;
     {
@@ -44,7 +52,7 @@ int main(int argc, char** argv)
     auto key3 = [](uint64_t a, uint64_t b, uint64_t c) { return a << 42 | b << 21 | c; };
     auto key2 = [](uint64_t a, uint64_t b) { return a << 21 | b; };
 
-    std::unordered_map<uint64_t, uint32_t> tri, ctx;
+    std::unordered_map<uint64_t, uint32_t> tri, ctx, pairs;
     tri.reserve(1 << 26);
     ctx.reserve(1 << 24);
     std::string line, tok;
@@ -53,20 +61,40 @@ int main(int argc, char** argv)
     while (std::getline(std::cin, line)) {
         ids.clear();
         tok.clear();
+        bool foreign = false;      // the current word has a letter outside a-z and the umlauts
         auto flush = [&]{
-            if (tok.empty()) return;
-            auto it = id.find(tok);
-            ids.push_back(it == id.end() ? -1 : it->second);
+            if (!tok.empty() || foreign) {
+                auto it = foreign ? id.end() : id.find(tok);
+                ids.push_back(it == id.end() ? -1 : it->second);
+            }
             tok.clear();
+            foreign = false;
         };
-        for (unsigned char ch : line) {
+        for (size_t i = 0; i < line.size(); i++) {
+            const unsigned char ch = (unsigned char)line[i];
             if (ch >= 'A' && ch <= 'Z') tok += (char)(ch - 'A' + 'a');
             else if (ch >= 'a' && ch <= 'z') tok += (char)ch;
             else if (ch == '\'') continue;
+            else if (ch == 0xC3 && i + 1 < line.size()) {
+                const unsigned char d = (unsigned char)line[++i];
+                if      (d == 0xA4 || d == 0x84) tok += "ae";     // ä Ä
+                else if (d == 0xB6 || d == 0x96) tok += "oe";     // ö Ö
+                else if (d == 0xBC || d == 0x9C) tok += "ue";     // ü Ü
+                else if (d == 0x9F)              tok += "ss";     // ß
+                else if ((d >= 0x80 && d <= 0x96) || (d >= 0x98 && d <= 0xB6) || d >= 0xB8) foreign = true;  // other Latin-1 letters
+                else flush();                                     // × ÷
+            }
+            else if (ch >= 0xC4 && ch < 0xF8) {                    // another non-ASCII character: part of a foreign word
+                foreign = true;
+                while (i + 1 < line.size() && ((unsigned char)line[i + 1] & 0xC0) == 0x80) i++;
+            }
             else flush();
         }
         flush();
         tokens += ids.size();
+        if (want_pairs)
+            for (size_t i = 0; i + 1 < ids.size(); i++)
+                if (ids[i] >= 0 && ids[i + 1] >= 0) pairs[key2(ids[i], ids[i + 1])]++;
         for (size_t i = 0; i + 2 < ids.size(); i++) {
             if (ids[i] < 0 || ids[i + 1] < 0) continue;
             ctx[key2(ids[i], ids[i + 1])]++;
@@ -101,6 +129,16 @@ int main(int argc, char** argv)
     f = std::fopen(argv[4], "w");
     for (const auto& [s, c] : cs) std::fprintf(f, "%s %u\n", s.c_str(), c);
     std::fclose(f);
+    if (want_pairs) {
+        std::vector<std::pair<std::string, uint32_t>> ps;
+        for (const auto& [k, c] : pairs)
+            if (c >= (uint64_t)min_count) ps.push_back({words[k >> 21] + " " + words[k & m], c});
+        std::sort(ps.begin(), ps.end());
+        f = std::fopen(argv[5], "w");
+        for (const auto& [s, c] : ps) std::fprintf(f, "%s %u\n", s.c_str(), c);
+        std::fclose(f);
+        std::fprintf(stderr, "kept %zu word pairs (count >= %ld)\n", ps.size(), min_count);
+    }
     std::fprintf(stderr, "%zu lines, %zu tokens, %zu distinct trigrams (n1 %zu, n2 %zu, D %.4f); "
                  "kept %zu trigrams (count >= %ld) in %zu contexts\n",
                  lines, tokens, tri.size(), n1, n2, D, kept.size(), min_count, cs.size());

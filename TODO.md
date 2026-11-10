@@ -35,7 +35,7 @@ chosen subset. Instead, give every custom word a realistic count before the run:
 
 1. **Web counts** where they exist: about half of such words are in Norvig's
    `count_1w.txt` (lol 16.1M, app 12.2M, plaintext 456k, ciphertext 220k), on the same
-   scale as `txt/english_unigrams.txt`.
+   scale as `txt/en/unigrams.txt`.
 2. **GPT-2 estimates** for the rest (too new for that corpus, such as github, chatgpt,
    bitcoin and emoji, or too rare, such as kasiski and playfair): the log
    probability of the word in a few neutral contexts, mapped to a count by a fit of GPT-2's
@@ -48,6 +48,14 @@ chosen subset. Instead, give every custom word a realistic count before the run:
 The word file would take an optional count per line (`github 1500000`), and a command would
 fill the counts in with 1-2. An existing index is then updated with `rerank` (about a
 minute, no new search) and `rescore` (GPT-2 on the new shortlist).
+
+## Ukrainian
+
+Ukrainian plaintexts use their own 33-letter alphabet (Vigenère mod 33), so the alphabet
+becomes a per-language setting: the trie's child arrays, the key letters the search tries,
+key packing (33^12 does not fit the index record's 58 bits for the key), UTF-8 input and
+output, and capitalization in GPT-2's sentences. Data as for German: a subtitle corpus, a
+spelling list, and a Ukrainian GPT-2 of the same shape.
 
 ## Faster index building
 

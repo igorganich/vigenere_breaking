@@ -6,11 +6,12 @@
 
 // ── GPT-2 small, for rescoring the best candidates ────────────────────────────
 //
-// A self-contained CPU implementation of OpenAI's GPT-2 (124M parameters) that reads the
-// Hugging Face release as it is: model.safetensors, vocab.json and merges.txt in one
-// directory (tools/get_gpt2.sh downloads them).  It does one thing: the total
-// log-probability of short texts, log P(text) = Σ log P(token | previous tokens), with the
-// end-of-text token as the context of the first token.
+// A self-contained CPU implementation of OpenAI's GPT-2 (124M parameters) that reads a
+// Hugging Face release as it is: model.safetensors, and vocab.json plus merges.txt or a
+// tokenizer.json, in one directory (tools/get_gpt2.sh downloads them).  Models of the same
+// shape for other languages (dbmdz/german-gpt2) load the same way.  It does one thing: the
+// total log-probability of short texts, log P(text) = Σ log P(token | previous tokens), with
+// the end-of-text token (or <s>) as the context of the first token.
 //
 // Results do not depend on the number of threads or on which texts share a batch: every
 // value is computed in a fixed order.  Matrix products use AVX2/FMA when the build targets
@@ -24,7 +25,7 @@ public:
     // Loads the model; throws std::runtime_error if a file is missing or malformed.
     explicit Gpt2(const std::string& dir);
 
-    // GPT-2 byte-level BPE token ids of `text` (ASCII only; throws otherwise).
+    // GPT-2 byte-level BPE token ids of `text` (UTF-8).
     std::vector<int> encode(const std::string& text) const;
 
     // Total log P(text) in nats for each text.
@@ -45,7 +46,7 @@ private:
     std::vector<double> forward(const std::vector<std::vector<int>>& seqs, int threads) const;
 
     int n_layer_ = 12, n_head_ = 12, n_embd_ = 768, n_vocab_ = 0, n_ctx_ = 0;
-    int eot_ = 0;                                      // <|endoftext|>
+    int eot_ = 0;                                      // <|endoftext|> (or <s>): context of the first token
     std::vector<float> wte_, wpe_, lnf_g_, lnf_b_;     // embeddings, final layer norm
     Packed head_;                                      // wte transposed: hidden -> logits
     std::vector<Layer> layers_;

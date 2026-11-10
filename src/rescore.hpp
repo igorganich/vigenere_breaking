@@ -22,8 +22,10 @@ struct Rescored {
     double      score = 0;
 };
 
-// The sentence GPT-2 reads for a plaintext and its trigram word split ("[i:11][am:209]...").
-std::string lm_sentence(const std::string& plain, const std::string& words);
+// The sentence GPT-2 reads for a plaintext and its trigram word split ("[i:11][am:209]..."):
+// words in their spelling for GPT-2 (Dictionary::display, German "schön") if `dict` has one,
+// English "i" as "I", a capital first letter and a full stop.
+std::string lm_sentence(const std::string& plain, const std::string& words, const Dictionary* dict = nullptr);
 
 // The best `top` candidates of the index, rescored and sorted (best first).
 std::vector<Rescored> rescore(IndexReader& idx, const Gpt2& lm, size_t top, int threads);

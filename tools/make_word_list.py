@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the cracker's dictionary, txt/english_words.txt, in order of frequency.
+"""Build the English dictionary, txt/en/words.txt, in order of frequency.
 
 Input: BASE, the 44,274-word corncob list this list was built from (txt/english_words.txt
 as of commit 719342e: `git show 719342e:txt/english_words.txt > base.txt`), and in DIR:
@@ -19,7 +19,7 @@ The list is made of:
     "operation"), for the derived forms SCOWL-large leaves out;
   - the words of ALWAYS, which neither source has ("vigenere", the cipher this tool breaks).
 Words are ordered by their count in count_1w; words it lacks come last, in BASE order.
-The result is written to txt/english_words.txt.
+The result is written to txt/en/words.txt.
 
 Usage: python3 tools/make_word_list.py BASE DIR
   then rebuild the counts: tools/make_ngram_tables.py and tools/count_trigrams.cpp (README).
@@ -27,7 +27,7 @@ Usage: python3 tools/make_word_list.py BASE DIR
 import os, sys
 
 ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WORDS = os.path.join(ROOT, "txt", "english_words.txt")   # output
+WORDS = os.path.join(ROOT, "txt", "en", "words.txt")   # output
 
 ALWAYS      = ["vigenere"]
 NAME_MIN    = 100_000

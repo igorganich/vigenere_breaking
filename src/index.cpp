@@ -37,7 +37,7 @@ int expanded_period(const std::string& key, int n)
 }
 
 struct Header {
-    std::string  cipher, dict, model = "zipf", model_fp;
+    std::string  cipher, lang = "en", dict, model = "zipf", model_fp;
     int          max_key_length = 12;
     IndexSummary sum;
 };
@@ -55,6 +55,7 @@ Header read_header(FILE* f, const std::string& path)
         std::string tag;
         ls >> tag;
         if      (tag == "cipher")         ls >> out.cipher;
+        else if (tag == "lang")           ls >> out.lang;
         else if (tag == "dict")           ls >> out.dict;
         else if (tag == "model")          ls >> out.model >> out.model_fp;
         else if (tag == "max_key_length") ls >> out.max_key_length;
@@ -139,7 +140,7 @@ void write_ranked(const std::string& cipher, const Dictionary& dict, const Langu
     chunk = std::max<size_t>(chunk, 1);
     TempFiles temp(path);
 
-    std::string h = "VIGIDX 1\ncipher " + cipher + "\ndict " + hex(dict.fingerprint) + " " +
+    std::string h = "VIGIDX 1\ncipher " + cipher + "\nlang " + dict.lang + "\ndict " + hex(dict.fingerprint) + " " +
                     std::to_string(dict.words.size()) + "\nmodel " + model.name + " " + model.fingerprint +
                     "\nmax_key_length " + std::to_string(max_key_length) +
                     "\ncount " + std::to_string(count) + "\n";
@@ -315,6 +316,7 @@ IndexSummary rerank_index(const std::string& in, const std::string& out, const D
         std::fseek(f, 0, SEEK_END);
         const long size = std::ftell(f);
         std::fclose(f);
+        if (h.lang != dict.lang) throw std::runtime_error(in + " was built for language " + h.lang + ", not " + dict.lang);
         if (h.dict != hex(dict.fingerprint)) throw std::runtime_error(in + " was built with a different dictionary");
         if (size < (long)(INDEX_HEADER_BYTES + 8 * h.sum.count)) throw std::runtime_error(in + " is truncated");
     }
@@ -325,15 +327,22 @@ IndexSummary rerank_index(const std::string& in, const std::string& out, const D
     return h.sum;
 }
 
-std::string index_model_name(const std::string& path)
+namespace {
+
+Header header_of(const std::string& path)
 {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) throw std::runtime_error("cannot open " + path);
     Header h;
     try { h = read_header(f, path); } catch (...) { std::fclose(f); throw; }
     std::fclose(f);
-    return h.model;
+    return h;
 }
+
+} // namespace
+
+std::string index_model_name(const std::string& path) { return header_of(path).model; }
+std::string index_lang(const std::string& path)       { return header_of(path).lang; }
 
 IndexReader::IndexReader(const std::string& path, const Dictionary& dict, const LanguageModel& model)
     : dict_(dict), model_(model)
@@ -345,7 +354,9 @@ IndexReader::IndexReader(const std::string& path, const Dictionary& dict, const 
     cipher_  = h.cipher;
     summary_ = h.sum;
     std::string why;
-    if (h.dict != hex(dict.fingerprint))
+    if (h.lang != dict.lang)
+        why = path + " was built for language " + h.lang + ", not " + dict.lang;
+    else if (h.dict != hex(dict.fingerprint))
         why = path + " was built with a different dictionary";
     else if (h.model == "zipf")
         why = path + " is ranked by the removed zipf model; update it with `rerank`";

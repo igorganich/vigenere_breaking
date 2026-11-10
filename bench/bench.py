@@ -16,7 +16,7 @@ from statistics import median
 
 ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN   = os.path.join(ROOT, "bin", "vigenere")
-WORDS = os.path.join(ROOT, "txt", "english_words.txt")
+WORDS = os.path.join(ROOT, "txt", "en", "words.txt")
 
 FIELDS = ["case", "clen", "kl", "key", "plain", "status", "rank", "n_cands", "skipped", "seconds"]
 

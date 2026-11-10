@@ -14,7 +14,7 @@
 // the key packed base 26 below; plaintext, word split and score are recomputed from the
 // key when read, so rank r is at byte INDEX_HEADER_BYTES + 8·(r − 1).
 //
-// Header lines:  VIGIDX 1 / cipher <text> / dict <fingerprint> <words> /
+// Header lines:  VIGIDX 1 / cipher <text> / lang <code> / dict <fingerprint> <words> /
 //                model <name> <fingerprint> / max_key_length <n> / count <n> /
 //                kl <len> <count> ... / note <text> ... / end
 // An index without a model line was ranked by the removed zipf model; `rerank` updates it.
@@ -55,6 +55,8 @@ IndexSummary rerank_index(const std::string& in, const std::string& out, const D
 // Name of the model an index is ranked by ("zipf" for indexes without a model line, which
 // can only be re-ranked).
 std::string index_model_name(const std::string& path);
+// The language an index was built for ("en" for indexes older than languages).
+std::string index_lang(const std::string& path);
 
 struct Candidate {
     size_t      rank;
@@ -74,6 +76,7 @@ public:
     const std::string&  cipher()  const { return cipher_; }
     const IndexSummary& summary() const { return summary_; }
     const LanguageModel& model() const { return model_; }
+    const Dictionary&   dict()    const { return dict_; }
 
     // Candidates of ranks [first, last] (1-based, clipped to the count).
     std::vector<Candidate> range(size_t first, size_t last);

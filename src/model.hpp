@@ -12,18 +12,18 @@
 
 // ── Language models for ranking ───────────────────────────────────────────────
 //
-//   unigram  P(w) = c(w) / Σ c over the dictionary, from txt/english_unigrams.txt.
-//   bigram   P(w₂ | w₁) from txt/english_bigrams.txt, backing off to the unigram model:
+//   unigram  P(w) = c(w) / Σ c over the dictionary, from txt/<lang>/unigrams.txt.
+//   bigram   P(w₂ | w₁) from txt/<lang>/bigrams.txt, backing off to the unigram model:
 //              c(w₁ w₂) / c(w₁)       for pairs in the table,
 //              α(w₁) · P(w₂)          for the rest,
 //            where α(w₁) spreads the probability the listed pairs leave over the words
 //            not listed after w₁, so P(· | w₁) sums to 1.  The table only holds pairs
 //            seen at least 100,000 times, so every unlisted pair is rarer than that; no
 //            parameter is tuned.
-//   trigram  P(w₃ | w₁ w₂) from txt/english_trigrams.txt, backing off to the bigram model:
+//   trigram  P(w₃ | w₁ w₂) from txt/<lang>/trigrams.txt, backing off to the bigram model:
 //              (c(w₁ w₂ w₃) − D) / c(w₁ w₂)   for trigrams in the table,
 //              α(w₁ w₂) · P(w₃ | w₂)           for the rest,
-//            with c(w₁ w₂) from txt/english_trigram_contexts.txt (every continuation,
+//            with c(w₁ w₂) from txt/<lang>/trigram_contexts.txt (every continuation,
 //            including trigrams below the table's cutoff) and α(w₁ w₂) again making
 //            P(· | w₁ w₂) sum to 1.  D is the absolute discount n₁ / (n₁ + 2 n₂) stored
 //            in the table.  A context without listed trigrams uses the bigram model.
@@ -120,7 +120,7 @@ inline void fnv(uint64_t& h, const std::string& s)
 
 } // namespace model_detail
 
-// `txt_dir` holds the english_*grams*.txt tables.  Throws std::runtime_error.
+// `txt_dir` (txt/<lang>) holds the *grams*.txt tables.  Throws std::runtime_error.
 inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::string& txt_dir)
 {
     using namespace model_detail;
@@ -130,7 +130,7 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
     uint64_t fp = 1469598103934665603ull;
 
     // Unigram counts.
-    const std::string uni_path = txt_dir + "/english_unigrams.txt";
+    const std::string uni_path = txt_dir + "/unigrams.txt";
     const std::string uni_text = read_all(uni_path);
     fnv(fp, uni_text);
     std::vector<double> count(d.trie.ch.size(), 0);
@@ -165,7 +165,7 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
     }
 
     if (kind == ModelKind::Bigram || kind == ModelKind::Trigram) {
-        const std::string bi_path = txt_dir + "/english_bigrams.txt";
+        const std::string bi_path = txt_dir + "/bigrams.txt";
         const std::string bi_text = read_all(bi_path);
         fnv(fp, bi_text);
         struct Pair { int u, v; double c; };
@@ -199,7 +199,7 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
             return u >= 0 && d.trie.mark[u] ? u : -1;
         };
         // Context counts c(w₁ w₂).
-        const std::string ctx_path = txt_dir + "/english_trigram_contexts.txt";
+        const std::string ctx_path = txt_dir + "/trigram_contexts.txt";
         const std::string ctx_text = read_all(ctx_path);
         fnv(fp, ctx_text);
         PairTable ctx_count;
@@ -216,7 +216,7 @@ inline LanguageModel load_model(ModelKind kind, const Dictionary& d, const std::
             }
         }
         // Trigram counts; the first line holds the discount.
-        const std::string tri_path = txt_dir + "/english_trigrams.txt";
+        const std::string tri_path = txt_dir + "/trigrams.txt";
         const std::string tri_text = read_all(tri_path);
         fnv(fp, tri_text);
         std::istringstream in(tri_text);

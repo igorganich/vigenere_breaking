@@ -12,6 +12,7 @@
 #include "cipher.hpp"
 #include "gpt2.hpp"
 #include "index.hpp"
+#include "lang.hpp"
 #include "rescore.hpp"
 #include "tables.hpp"
 
@@ -28,9 +29,24 @@ static std::string exe_dir()
     return slash == std::string::npos ? "." : p.substr(0, slash);
 }
 
-static const std::string TXT_DIR   = exe_dir() + "/../txt";
-static const std::string DICT_FILE = TXT_DIR + "/english_words.txt";
-static const std::string GPT2_DIR  = exe_dir() + "/../models/gpt2";
+static const std::string TXT_DIR    = exe_dir() + "/../txt";       // txt/<lang>/: word list, tables
+static const std::string MODELS_DIR = exe_dir() + "/../models";    // models/<gpt2_dir>/
+
+static const Language& language(const std::string& code)
+{
+    const Language* l = find_language(code);
+    if (!l) { std::cerr << "unknown language " << code << " (languages: " << language_codes() << ")\n"; std::exit(1); }
+    return *l;
+}
+
+static std::string gpt2_dir(const Dictionary& dict) { return MODELS_DIR + "/" + language(dict.lang).gpt2_dir; }
+
+// The language of an existing index; exits with a message if it cannot be read.
+static std::string lang_of(const std::string& index_path)
+{
+    try { return index_lang(index_path); }
+    catch (const std::exception& ex) { std::cerr << ex.what() << '\n'; std::exit(1); }
+}
 
 static constexpr int MAX_CIPHER_LEN = 25;
 
@@ -67,6 +83,9 @@ static void usage(const char* prog)
         "                            (default 1000000000; candidates are kept on disk: about\n"
         "                            24 bytes each while building, 8 in the index)\n"
         "        --model M           ranking model: unigram, bigram or trigram (default trigram)\n"
+        "        --lang L            plaintext language: en (default) or de (German, with\n"
+        "                            ä ö ü ß written ae oe ue ss); later commands read it\n"
+        "                            from the index\n"
         "        --words FILE        add the words of FILE (one or more per line, # comments) to the\n"
         "                            dictionary; saved as <index_file>.words for later commands\n"
         "        --threads N         worker threads (default: all)\n"
@@ -103,7 +122,7 @@ static void run_rescore(IndexReader& idx, const std::string& path, size_t top, s
 {
     using Clock = std::chrono::steady_clock;
     auto t0 = Clock::now();
-    Gpt2 lm(GPT2_DIR);
+    Gpt2 lm(gpt2_dir(idx.dict()));
     auto t1 = Clock::now();
     if (threads <= 0) threads = (int)std::max(1u, std::thread::hardware_concurrency());
     const auto list = rescore(idx, lm, top, threads);
@@ -118,15 +137,19 @@ static void run_rescore(IndexReader& idx, const std::string& path, size_t top, s
 // dictionary it was built with.
 static std::string words_path(const std::string& index_path) { return index_path + ".words"; }
 
-// The dictionary plus custom words: from `words_file` if given, else those saved next to
-// `index_path` (if any).
-static Dictionary load(const std::string& words_file = "", const std::string& index_path = "")
+// The dictionary of a language plus custom words: from `words_file` if given, else those
+// saved next to `index_path` (if any).
+static Dictionary load(const std::string& lang, const std::string& words_file = "", const std::string& index_path = "")
 {
+    const Language& l = language(lang);
     try {
         std::vector<std::string> extra;
         if (!words_file.empty()) extra = read_word_file(words_file);
         else if (!index_path.empty() && std::ifstream(words_path(index_path))) extra = read_word_file(words_path(index_path));
-        return load_dictionary(DICT_FILE, extra);
+        Dictionary d = load_dictionary(TXT_DIR + "/" + l.code + "/words.txt", extra, l.singles);
+        d.lang = l.code;
+        load_display(d, TXT_DIR + "/" + l.code + "/display.txt");
+        return d;
     }
     catch (const std::exception& ex) { std::cerr << ex.what() << '\n'; std::exit(1); }
 }
@@ -144,7 +167,7 @@ static void save_words(const Dictionary& dict, const std::string& index_path)
 
 static LanguageModel load_lm(const Dictionary& dict, ModelKind kind)
 {
-    try { return load_model(kind, dict, TXT_DIR); }
+    try { return load_model(kind, dict, TXT_DIR + "/" + dict.lang); }
     catch (const std::exception& ex) { std::cerr << ex.what() << '\n'; std::exit(1); }
 }
 
@@ -176,10 +199,11 @@ static int cmd_crack(int argc, char** argv)
     size_t top = 10, lm_top = 20000;
     bool use_lm = true;
     ModelKind kind = ModelKind::Trigram;
-    std::string words_file;
+    std::string words_file, lang = "en";
     for (int i = 4; i < argc; i++) {
         std::string a = argv[i];
         if      (a == "--threads"        && i + 1 < argc) opt.threads        = std::stoi(argv[++i]);
+        else if (a == "--lang"           && i + 1 < argc) lang               = argv[++i];
         else if (a == "--words"          && i + 1 < argc) words_file         = argv[++i];
         else if (a == "--lm-top"         && i + 1 < argc) lm_top             = std::stoul(argv[++i]);
         else if (a == "--no-lm")                          use_lm             = false;
@@ -197,7 +221,7 @@ static int cmd_crack(int argc, char** argv)
         std::cerr << "ciphertext must have 2.." << MAX_CIPHER_LEN << " letters (has " << cipher.size() << ")\n";
         return 1;
     }
-    Dictionary dict = load(words_file.empty() ? "" : words_file);
+    Dictionary dict = load(lang, words_file);
     if (!dict.extra.empty()) std::fprintf(stderr, "dictionary: %zu custom words from %s\n", dict.extra.size(), words_file.c_str());
     LanguageModel model = load_lm(dict, kind);
     try {
@@ -209,12 +233,13 @@ static int cmd_crack(int argc, char** argv)
         }
         IndexReader idx(argv[3], dict, model);
         for (const auto& note : idx.summary().notes) std::fprintf(stderr, "note: %s\n", note.c_str());
-        if (use_lm && lm_top > 0 && Gpt2::available(GPT2_DIR)) {
+        if (use_lm && lm_top > 0 && Gpt2::available(gpt2_dir(dict))) {
             run_rescore(idx, argv[3], lm_top, top, opt.threads);
         } else {
             if (use_lm && lm_top > 0)
-                std::fprintf(stderr, "note: GPT-2 not found in %s (run tools/get_gpt2.sh); "
-                             "showing the %s ranking\n", GPT2_DIR.c_str(), model.name.c_str());
+                std::fprintf(stderr, "note: GPT-2 not found in %s (run %s); "
+                             "showing the %s ranking\n", gpt2_dir(dict).c_str(), language(lang).get_gpt2.c_str(),
+                             model.name.c_str());
             for (const auto& c : idx.range(1, top)) print(c);
         }
     } catch (const std::exception& ex) {
@@ -237,7 +262,7 @@ static int cmd_rerank(int argc, char** argv)
         else if (a == "--top"     && i + 1 < argc) top     = std::stoul(argv[++i]);
         else { std::cerr << "unknown option: " << a << '\n'; usage(argv[0]); }
     }
-    Dictionary dict = load("", argv[2]);
+    Dictionary dict = load(lang_of(argv[2]), "", argv[2]);
     LanguageModel model = load_lm(dict, kind);
     try {
         std::remove(shortlist_path(argv[3]).c_str());       // ranked by the old order
@@ -278,11 +303,11 @@ static int cmd_rescore(int argc, char** argv)
         else if (a == "--threads" && i + 1 < argc) threads = std::stoi(argv[++i]);
         else { std::cerr << "unknown option: " << a << '\n'; usage(argv[0]); }
     }
-    if (!Gpt2::available(GPT2_DIR)) {
-        std::cerr << "GPT-2 not found in " << GPT2_DIR << " (run tools/get_gpt2.sh)\n";
+    Dictionary dict = load(lang_of(argv[2]), "", argv[2]);
+    if (!Gpt2::available(gpt2_dir(dict))) {
+        std::cerr << "GPT-2 not found in " << gpt2_dir(dict) << " (run " << language(dict.lang).get_gpt2 << ")\n";
         return 1;
     }
-    Dictionary dict = load("", argv[2]);
     try {
         LanguageModel model = index_model(dict, argv[2]);
         IndexReader idx(argv[2], dict, model);
@@ -296,7 +321,7 @@ static int cmd_rescore(int argc, char** argv)
                 ranks.push_back(r);
             }
             if (threads <= 0) threads = (int)std::max(1u, std::thread::hardware_concurrency());
-            Gpt2 lm(GPT2_DIR);
+            Gpt2 lm(gpt2_dir(dict));
             const auto start = std::chrono::steady_clock::now();
             size_t first_done = SIZE_MAX;
             const auto list = rescore_ranks(idx, lm, ranks, scores_file, threads, 20000, [&](size_t done, size_t total){
@@ -321,7 +346,7 @@ static int cmd_rescore(int argc, char** argv)
 static int cmd_show(int argc, char** argv)
 {
     if (argc < 4) usage(argv[0]);
-    Dictionary dict = load("", argv[2]);
+    Dictionary dict = load(lang_of(argv[2]), "", argv[2]);
     try {
         LanguageModel model = index_model(dict, argv[2]);
         IndexReader idx(argv[2], dict, model);

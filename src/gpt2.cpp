@@ -184,6 +184,7 @@ public:
         if (!f_) throw std::runtime_error(path_ + ": truncated tensor " + name);
         return v;
     }
+    bool has(const std::string& name) const { return header_.get(name) != nullptr; }
     std::vector<int> shape(const std::string& name) {
         const Json* t = header_.get(name);
         if (!t || !t->get("shape")) throw std::runtime_error(path_ + ": no tensor " + name);
@@ -286,9 +287,9 @@ void layer_norm(const float* x, float* y, int M, int D, const std::vector<float>
 
 bool Gpt2::available(const std::string& dir)
 {
-    for (const char* f : {"/model.safetensors", "/vocab.json", "/merges.txt"})
-        if (!std::ifstream(dir + f)) return false;
-    return true;
+    if (!std::ifstream(dir + "/model.safetensors")) return false;
+    return (std::ifstream(dir + "/vocab.json") && std::ifstream(dir + "/merges.txt")) ||
+           std::ifstream(dir + "/tokenizer.json");
 }
 
 Gpt2::Gpt2(const std::string& dir)
@@ -306,37 +307,57 @@ Gpt2::Gpt2(const std::string& dir)
             byte_symbol_[b].clear();
             append_utf8(byte_symbol_[b], direct[b] ? (uint32_t)b : (uint32_t)(256 + extra++));
         }
-        const std::string vocab_text = read_file(dir + "/vocab.json");
-        const Json vocab = JsonParser(vocab_text, dir + "/vocab.json").parse();
-        for (const auto& [tok, id] : vocab.obj) vocab_[tok] = (int)id.num;
-        auto eot = vocab_.find("<|endoftext|>");
-        if (eot == vocab_.end()) throw std::runtime_error(dir + "/vocab.json: no <|endoftext|> token");
-        eot_ = eot->second;
-        std::ifstream m(dir + "/merges.txt");
-        if (!m) throw std::runtime_error("cannot open " + dir + "/merges.txt");
-        std::string line;
-        int rank = 0;
-        while (std::getline(m, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty() || line.rfind("#version", 0) == 0) continue;
-            merge_rank_.emplace(line, rank++);
+        // OpenAI's release has vocab.json and merges.txt; others (dbmdz/german-gpt2) only a
+        // Hugging Face tokenizer.json, whose BPE model holds the same vocabulary and merges.
+        if (std::ifstream(dir + "/vocab.json")) {
+            const std::string vocab_text = read_file(dir + "/vocab.json");
+            const Json vocab = JsonParser(vocab_text, dir + "/vocab.json").parse();
+            for (const auto& [tok, id] : vocab.obj) vocab_[tok] = (int)id.num;
+            std::ifstream m(dir + "/merges.txt");
+            if (!m) throw std::runtime_error("cannot open " + dir + "/merges.txt");
+            std::string line;
+            int rank = 0;
+            while (std::getline(m, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty() || line.rfind("#version", 0) == 0) continue;
+                merge_rank_.emplace(line, rank++);
+            }
+        } else {
+            const std::string path = dir + "/tokenizer.json";
+            const Json tok = JsonParser(read_file(path), path).parse();
+            const Json* model = tok.get("model");
+            const Json* vocab = model ? model->get("vocab") : nullptr;
+            const Json* merges = model ? model->get("merges") : nullptr;
+            if (!vocab || !merges) throw std::runtime_error(path + ": no BPE vocabulary and merges");
+            for (const auto& [t, id] : vocab->obj) vocab_[t] = (int)id.num;
+            int rank = 0;
+            for (const auto& m : merges->arr)          // "a b", or ["a", "b"] in newer files
+                merge_rank_.emplace(m.type == Json::String ? m.str : m.arr.at(0).str + " " + m.arr.at(1).str, rank++);
         }
+        // The context of the first token: GPT-2's end-of-text token, or <s> in models that
+        // use it as their beginning-of-sequence token.
+        auto eot = vocab_.find("<|endoftext|>");
+        if (eot == vocab_.end()) eot = vocab_.find("<s>");
+        if (eot == vocab_.end()) throw std::runtime_error(dir + ": no <|endoftext|> or <s> token");
+        eot_ = eot->second;
     }
 
     SafeTensors st(dir + "/model.safetensors");
-    const auto wte_shape = st.shape("wte.weight"), wpe_shape = st.shape("wpe.weight");
+    const std::string pre = st.has("wte.weight") ? "" : "transformer.";   // GPT2Model or GPT2LMHeadModel names
+    auto name = [&](const std::string& n) { return pre + n; };
+    const auto wte_shape = st.shape(name("wte.weight")), wpe_shape = st.shape(name("wpe.weight"));
     if (wte_shape.size() != 2 || wpe_shape.size() != 2 || wte_shape[1] != n_embd_ || wpe_shape[1] != n_embd_)
         throw std::runtime_error(dir + "/model.safetensors: not GPT-2 small (n_embd 768)");
     n_vocab_ = wte_shape[0];
     n_ctx_   = wpe_shape[0];
     const int D = n_embd_;
-    wte_ = st.get("wte.weight", (size_t)n_vocab_ * D);
-    wpe_ = st.get("wpe.weight", (size_t)n_ctx_ * D);
+    wte_ = st.get(name("wte.weight"), (size_t)n_vocab_ * D);
+    wpe_ = st.get(name("wpe.weight"), (size_t)n_ctx_ * D);
     head_ = pack(wte_, D, n_vocab_, true, {});
-    lnf_g_ = st.get("ln_f.weight", D);
-    lnf_b_ = st.get("ln_f.bias", D);
+    lnf_g_ = st.get(name("ln_f.weight"), D);
+    lnf_b_ = st.get(name("ln_f.bias"), D);
     for (int l = 0; l < n_layer_; l++) {
-        const std::string p = "h." + std::to_string(l) + ".";
+        const std::string p = name("h." + std::to_string(l) + ".");
         Layer L;
         L.ln1_g = st.get(p + "ln_1.weight", D);
         L.ln1_b = st.get(p + "ln_1.bias", D);
@@ -355,11 +376,10 @@ Gpt2::Gpt2(const std::string& dir)
 std::vector<int> Gpt2::encode(const std::string& text) const
 {
     // Pre-tokenization: GPT-2's pattern  's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+|
-    // ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+  for ASCII text.
-    for (unsigned char c : text)
-        if (c >= 0x80) throw std::runtime_error("GPT-2 tokenizer: only ASCII text is supported");
+    // ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+.  Every byte of a non-ASCII UTF-8 character counts as
+    // a letter: the sentences read here are words (ä, ö, ü, ß, Cyrillic) and ASCII punctuation.
     auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; };
-    auto is_alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+    auto is_alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (unsigned char)c >= 0x80; };
     auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
     std::vector<std::string> chunks;
     const size_t n = text.size();

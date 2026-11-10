@@ -106,10 +106,10 @@ static double score_of_split(const Dictionary& d, const LanguageModel& m, const 
 
 int main()
 {
-    Dictionary dict = load_dictionary("txt/english_words.txt");
-    const LanguageModel unigram = load_model(ModelKind::Unigram, dict, "txt");
-    const LanguageModel bigram  = load_model(ModelKind::Bigram, dict, "txt");
-    const LanguageModel trigram = load_model(ModelKind::Trigram, dict, "txt");
+    Dictionary dict = load_dictionary("txt/en/words.txt");
+    const LanguageModel unigram = load_model(ModelKind::Unigram, dict, "txt/en");
+    const LanguageModel bigram  = load_model(ModelKind::Bigram, dict, "txt/en");
+    const LanguageModel trigram = load_model(ModelKind::Trigram, dict, "txt/en");
     const int threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
 
     // ── find_keys equals brute force ─────────────────────────────────────────
@@ -360,8 +360,32 @@ int main()
     }
     {
         bool threw = false;
-        try { IndexReader bad("txt/english_words.txt", dict, trigram); } catch (const std::exception&) { threw = true; }
+        try { IndexReader bad("txt/en/words.txt", dict, trigram); } catch (const std::exception&) { threw = true; }
         check(threw, "index: a non-index file is rejected");
+    }
+    {
+        // German: no 1-letter words, spellings for GPT-2, the language recorded in the index.
+        Dictionary de = load_dictionary("txt/de/words.txt", {}, {});
+        de.lang = "de";
+        load_display(de, "txt/de/display.txt");
+        check(!de.words.count("a") && !de.words.count("i") && dict.words.count("a") && dict.words.count("i"),
+              "languages: 1-letter words are per language (English a and i, German none)");
+        check(lm_sentence("dashausistschoen", "[das:3][haus:99][ist:4][schoen:200]", &de) == "Das Haus ist schön." &&
+              lm_sentence("ueberall", "[ueberall:500]", &de) == "Überall." &&
+              lm_sentence("iamhere", "[i:11][am:209][here:80]", &dict) == "I am here.",
+              "languages: GPT-2 reads German spellings (schön, capital Ü) and English capital I");
+        const LanguageModel de_tri = load_model(ModelKind::Trigram, de, "txt/de");
+        const std::string other = path + ".de_test";
+        IndexOptions opt;
+        opt.max_key_length = 4;
+        build_index(encrypt("dashausistschoen", "abc"), de, de_tri, opt, other);
+        size_t rank = 0;
+        { IndexReader idx(other, de, de_tri); rank = idx.rank_of("dashausistschoen"); }
+        check(rank == 1 && index_lang(other) == "de", "languages: German index finds its plaintext and records lang de");
+        bool threw = false;
+        try { IndexReader wrong(other, dict, trigram); } catch (const std::exception&) { threw = true; }
+        check(threw, "languages: a German index is rejected with the English dictionary");
+        unlink(other.c_str());
     }
     unlink(path.c_str());
 
